@@ -36,6 +36,9 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 toml = "0.8"
 dirs = "5"
 
+# Font rendering
+freetype-rs = "0.35"
+
 [[bin]]
 name = "ttwm"
 path = "src/main.rs"

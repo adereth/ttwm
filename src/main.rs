@@ -11,9 +11,11 @@ mod state;
 mod tracing;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use freetype::Library as FtLibrary;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::protocol::Event;
@@ -105,6 +107,278 @@ impl Default for LayoutConfig {
     }
 }
 
+/// Font renderer using FreeType for anti-aliased text
+struct FontRenderer {
+    _library: FtLibrary,
+    face: freetype::Face,
+    _char_width: u32,
+    char_height: u32,
+    ascender: i32,
+}
+
+impl FontRenderer {
+    /// Create a new font renderer with the specified font and size
+    fn new(font_name: &str, font_size: u32) -> Result<Self> {
+        // Initialize FreeType library
+        let library = FtLibrary::init().context("Failed to initialize FreeType")?;
+
+        // Use fontconfig to find the font file
+        let font_path = Self::find_font(font_name)?;
+        log::info!("Loading font: {:?}", font_path);
+
+        // Load the font face
+        let face = library
+            .new_face(&font_path, 0)
+            .context("Failed to load font face")?;
+
+        // Set the font size (in 1/64th points, at 96 DPI)
+        face.set_char_size(0, (font_size as isize) * 64, 96, 96)
+            .context("Failed to set font size")?;
+
+        // Get font metrics
+        let metrics = face.size_metrics().context("Failed to get font metrics")?;
+        let char_height = (metrics.height >> 6) as u32;
+        let ascender = (metrics.ascender >> 6) as i32;
+
+        // Calculate average character width (using 'M' as reference)
+        let char_width = if face.load_char('M' as usize, freetype::face::LoadFlag::DEFAULT).is_ok() {
+            let glyph = face.glyph();
+            (glyph.advance().x >> 6) as u32
+        } else {
+            // Fallback: estimate based on size
+            (font_size as f32 * 0.6) as u32
+        };
+
+        log::info!(
+            "Font loaded: char_width={}, char_height={}, ascender={}",
+            char_width,
+            char_height,
+            ascender
+        );
+
+        Ok(Self {
+            _library: library,
+            face,
+            _char_width: char_width,
+            char_height,
+            ascender,
+        })
+    }
+
+    /// Find font file path by searching common font directories
+    fn find_font(font_name: &str) -> Result<PathBuf> {
+        // Common font directories on Linux
+        let font_dirs = [
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            "/home",  // Will search ~/.local/share/fonts via home dir
+        ];
+
+        // Also check user font directory
+        let home_fonts = dirs::home_dir()
+            .map(|h| h.join(".local/share/fonts"))
+            .filter(|p| p.exists());
+
+        // Font file patterns to search for (ordered by preference)
+        let font_patterns: Vec<String> = if font_name == "monospace" {
+            // For "monospace", try common monospace fonts
+            vec![
+                "DejaVuSansMono".to_string(),
+                "LiberationMono".to_string(),
+                "UbuntuMono".to_string(),
+                "DroidSansMono".to_string(),
+                "FreeMono".to_string(),
+                "NotoSansMono".to_string(),
+            ]
+        } else {
+            // Convert font name to possible file name patterns
+            let normalized = font_name.replace(' ', "");
+            vec![
+                normalized.clone(),
+                font_name.replace(' ', "-"),
+                font_name.to_string(),
+            ]
+        };
+
+        // Search font directories
+        let mut dirs_to_search: Vec<PathBuf> = font_dirs
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .collect();
+
+        if let Some(home_font_dir) = home_fonts {
+            dirs_to_search.insert(0, home_font_dir);
+        }
+
+        for pattern in &font_patterns {
+            for dir in &dirs_to_search {
+                if let Some(font_path) = Self::search_font_in_dir(dir, pattern) {
+                    log::info!("Found font: {:?}", font_path);
+                    return Ok(font_path);
+                }
+            }
+        }
+
+        // Last resort: look for any .ttf or .otf file
+        for dir in &dirs_to_search {
+            if let Some(font_path) = Self::find_any_font_in_dir(dir) {
+                log::warn!("Font '{}' not found, using fallback: {:?}", font_name, font_path);
+                return Ok(font_path);
+            }
+        }
+
+        anyhow::bail!("No suitable font found. Please install a TTF/OTF font.")
+    }
+
+    /// Search for a font file matching the pattern in a directory (recursive)
+    fn search_font_in_dir(dir: &PathBuf, pattern: &str) -> Option<PathBuf> {
+        let pattern_lower = pattern.to_lowercase();
+
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                if path.is_dir() {
+                    if let Some(found) = Self::search_font_in_dir(&path, pattern) {
+                        return Some(found);
+                    }
+                } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    let name_lower = name.to_lowercase();
+                    // Check if it's a font file and matches the pattern
+                    if (name_lower.ends_with(".ttf") || name_lower.ends_with(".otf"))
+                        && name_lower.contains(&pattern_lower)
+                        && !name_lower.contains("bold")
+                        && !name_lower.contains("italic")
+                        && !name_lower.contains("oblique")
+                    {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find any regular font file in a directory
+    fn find_any_font_in_dir(dir: &PathBuf) -> Option<PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                if path.is_dir() {
+                    // Check ttf subdirectory first (common on Linux)
+                    if path.file_name().map_or(false, |n| n == "truetype" || n == "TTF") {
+                        if let Some(found) = Self::find_any_font_in_dir(&path) {
+                            return Some(found);
+                        }
+                    }
+                } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    let name_lower = name.to_lowercase();
+                    if (name_lower.ends_with(".ttf") || name_lower.ends_with(".otf"))
+                        && !name_lower.contains("bold")
+                        && !name_lower.contains("italic")
+                    {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Render text and return BGRA pixel data (for X11 ZPixmap format)
+    fn render_text(&self, text: &str, fg_color: u32, bg_color: u32) -> (Vec<u8>, u32, u32) {
+        if text.is_empty() {
+            return (Vec::new(), 0, 0);
+        }
+
+        // Calculate text dimensions
+        let width = self.measure_text(text);
+        let height = self.char_height;
+
+        if width == 0 || height == 0 {
+            return (Vec::new(), 0, 0);
+        }
+
+        // Create BGRA buffer (X11 uses BGRX in 32-bit depth)
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+
+        // Fill with background color
+        let bg_b = (bg_color & 0xFF) as u8;
+        let bg_g = ((bg_color >> 8) & 0xFF) as u8;
+        let bg_r = ((bg_color >> 16) & 0xFF) as u8;
+        for i in 0..(width * height) as usize {
+            pixels[i * 4] = bg_b;
+            pixels[i * 4 + 1] = bg_g;
+            pixels[i * 4 + 2] = bg_r;
+            pixels[i * 4 + 3] = 0xFF;
+        }
+
+        // Extract foreground color components
+        let fg_b = (fg_color & 0xFF) as u8;
+        let fg_g = ((fg_color >> 8) & 0xFF) as u8;
+        let fg_r = ((fg_color >> 16) & 0xFF) as u8;
+
+        // Render each character
+        let mut x_pos: i32 = 0;
+        for ch in text.chars() {
+            if self.face.load_char(ch as usize, freetype::face::LoadFlag::RENDER).is_ok() {
+                let glyph = self.face.glyph();
+                let bitmap = glyph.bitmap();
+                let bitmap_left = glyph.bitmap_left();
+                let bitmap_top = glyph.bitmap_top();
+
+                let glyph_x = x_pos + bitmap_left;
+                let glyph_y = self.ascender - bitmap_top;
+
+                // Copy glyph bitmap to output (with alpha blending)
+                for row in 0..bitmap.rows() {
+                    for col in 0..bitmap.width() {
+                        let px = glyph_x + col;
+                        let py = glyph_y + row;
+
+                        if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
+                            let src_idx = (row * bitmap.pitch() + col) as usize;
+                            let alpha = bitmap.buffer()[src_idx] as u32;
+
+                            if alpha > 0 {
+                                let dst_idx = ((py as u32 * width + px as u32) * 4) as usize;
+                                if alpha == 255 {
+                                    pixels[dst_idx] = fg_b;
+                                    pixels[dst_idx + 1] = fg_g;
+                                    pixels[dst_idx + 2] = fg_r;
+                                } else {
+                                    // Alpha blend
+                                    let inv_alpha = 255 - alpha;
+                                    pixels[dst_idx] = ((fg_b as u32 * alpha + pixels[dst_idx] as u32 * inv_alpha) / 255) as u8;
+                                    pixels[dst_idx + 1] = ((fg_g as u32 * alpha + pixels[dst_idx + 1] as u32 * inv_alpha) / 255) as u8;
+                                    pixels[dst_idx + 2] = ((fg_r as u32 * alpha + pixels[dst_idx + 2] as u32 * inv_alpha) / 255) as u8;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                x_pos += (glyph.advance().x >> 6) as i32;
+            }
+        }
+
+        (pixels, width, height)
+    }
+
+    /// Measure text width in pixels
+    fn measure_text(&self, text: &str) -> u32 {
+        let mut width: i32 = 0;
+        for ch in text.chars() {
+            if self.face.load_char(ch as usize, freetype::face::LoadFlag::DEFAULT).is_ok() {
+                width += (self.face.glyph().advance().x >> 6) as i32;
+            }
+        }
+        width.max(0) as u32
+    }
+}
+
 /// Drag state for tab drag-and-drop
 struct DragState {
     /// Window being dragged
@@ -147,6 +421,8 @@ struct Wm {
     keybindings: HashMap<WmAction, ParsedBinding>,
     /// Current drag operation (if any)
     drag_state: Option<DragState>,
+    /// Font renderer for tab text
+    font_renderer: FontRenderer,
 }
 
 impl Wm {
@@ -205,6 +481,12 @@ impl Wm {
         let user_config = Config::load();
         let keybindings = user_config.parse_keybindings();
 
+        // Initialize font renderer
+        let font_renderer = FontRenderer::new(
+            &user_config.appearance.tab_font,
+            user_config.appearance.tab_font_size,
+        ).context("Failed to initialize font renderer")?;
+
         // Build LayoutConfig from user config
         let config = LayoutConfig {
             gap: user_config.appearance.gap,
@@ -239,6 +521,7 @@ impl Wm {
             user_config,
             keybindings,
             drag_state: None,
+            font_renderer,
         })
     }
 
@@ -414,7 +697,6 @@ impl Wm {
     fn calculate_tab_layout(&self, frame_id: NodeId) -> Vec<(i16, u32)> {
         const MIN_TAB_WIDTH: u32 = 80;
         const MAX_TAB_WIDTH: u32 = 200;
-        const CHAR_WIDTH: u32 = 7;  // Approximate pixels per character
         const H_PADDING: u32 = 24;  // Total horizontal padding (12px each side)
 
         let frame = match self.layout.get(frame_id).and_then(|n| n.as_frame()) {
@@ -427,7 +709,7 @@ impl Wm {
 
         for &client_window in &frame.windows {
             let title = self.get_window_title(client_window);
-            let title_width = title.chars().count() as u32 * CHAR_WIDTH;
+            let title_width = self.font_renderer.measure_text(&title);
             let tab_width = (title_width + H_PADDING).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
 
             result.push((x_offset, tab_width));
@@ -597,27 +879,76 @@ impl Wm {
 
             // Get window title and truncate if needed
             let title = self.get_window_title(client_window);
-            let max_chars = ((tab_width as i16 - h_padding * 2) / 7).max(3) as usize;
-            let display_title = if title.chars().count() > max_chars {
-                let truncated: String = title.chars().take(max_chars.saturating_sub(3)).collect();
-                format!("{}...", truncated)
-            } else {
-                title
-            };
+            let available_width = (tab_width as i32 - h_padding as i32 * 2).max(0) as u32;
+            let display_title = self.truncate_text_to_width(&title, available_width);
 
-            // Draw text (vertically centered)
-            let text_y = (height / 2 + accent_height / 2 + 4) as i16;
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_text_color))?;
-            self.conn.image_text8(
-                window,
-                self.gc,
-                x + h_padding,
-                text_y,
-                display_title.as_bytes(),
-            )?;
+            // Render text with FreeType
+            let (pixels, text_width, text_height) = self.font_renderer.render_text(
+                &display_title,
+                self.config.tab_text_color,
+                bg_color,
+            );
+
+            if !pixels.is_empty() && text_width > 0 && text_height > 0 {
+                // Calculate text position (vertically centered)
+                let text_x = x + h_padding;
+                let text_y = accent_height as i16 + ((height - accent_height - text_height) / 2) as i16;
+
+                // Draw text using put_image
+                self.conn.put_image(
+                    ImageFormat::Z_PIXMAP,
+                    window,
+                    self.gc,
+                    text_width as u16,
+                    text_height as u16,
+                    text_x,
+                    text_y,
+                    0,
+                    24, // depth (24-bit color, will be padded to 32)
+                    &pixels,
+                )?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Truncate text to fit within a given pixel width, adding "..." if needed
+    fn truncate_text_to_width(&self, text: &str, max_width: u32) -> String {
+        if text.is_empty() || max_width == 0 {
+            return String::new();
+        }
+
+        let full_width = self.font_renderer.measure_text(text);
+        if full_width <= max_width {
+            return text.to_string();
+        }
+
+        // We need to truncate - find how many characters fit with "..."
+        let ellipsis = "...";
+        let ellipsis_width = self.font_renderer.measure_text(ellipsis);
+
+        if ellipsis_width >= max_width {
+            return String::new();
+        }
+
+        let available_for_text = max_width - ellipsis_width;
+        let mut truncated = String::new();
+        let mut current_width = 0u32;
+
+        for ch in text.chars() {
+            let ch_str = ch.to_string();
+            let ch_width = self.font_renderer.measure_text(&ch_str);
+
+            if current_width + ch_width > available_for_text {
+                break;
+            }
+
+            truncated.push(ch);
+            current_width += ch_width;
+        }
+
+        format!("{}{}", truncated, ellipsis)
     }
 
     /// Get window title (WM_NAME or _NET_WM_NAME)

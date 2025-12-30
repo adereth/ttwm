@@ -14,6 +14,10 @@ outer_gap = 8
 border_width = 2
 # Tab bar height (pixels)
 tab_bar_height = 28
+# Tab bar font (fontconfig name, e.g., "monospace", "DejaVu Sans Mono", "JetBrains Mono")
+tab_font = "monospace"
+# Tab bar font size in points
+tab_font_size = 11
 
 [colors]
 # Colors in hex format (#RRGGBB)
