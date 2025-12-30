@@ -13,7 +13,7 @@ outer_gap = 8
 # Window border width (pixels)
 border_width = 2
 # Tab bar height (pixels)
-tab_bar_height = 20
+tab_bar_height = 28
 
 [colors]
 # Colors in hex format (#RRGGBB)
@@ -21,6 +21,10 @@ tab_bar_bg = "#2e2e2e"
 tab_focused_bg = "#5294e2"
 tab_unfocused_bg = "#3a3a3a"
 tab_text = "#ffffff"
+# Chrome-style accent line on active tab
+tab_active_accent = "#5294e2"
+# Separator between inactive tabs
+tab_separator = "#4a4a4a"
 border_focused = "#5294e2"
 border_unfocused = "#3a3a3a"
 

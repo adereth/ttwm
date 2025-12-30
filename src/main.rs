@@ -76,6 +76,10 @@ struct LayoutConfig {
     tab_unfocused_bg: u32,
     /// Tab bar text color
     tab_text_color: u32,
+    /// Active tab accent line color
+    tab_active_accent: u32,
+    /// Tab separator color
+    tab_separator: u32,
     /// Border color for focused window
     border_focused: u32,
     /// Border color for unfocused window
@@ -88,11 +92,13 @@ impl Default for LayoutConfig {
             gap: 8,
             outer_gap: 8,
             border_width: 2,
-            tab_bar_height: 20,
-            tab_bar_bg: 0x2e2e2e,      // Dark gray
+            tab_bar_height: 28,
+            tab_bar_bg: 0x2e2e2e,       // Dark gray
             tab_focused_bg: 0x5294e2,   // Blue (matching border)
             tab_unfocused_bg: 0x3a3a3a, // Darker gray
             tab_text_color: 0xffffff,   // White
+            tab_active_accent: 0x5294e2, // Blue accent line
+            tab_separator: 0x4a4a4a,    // Subtle separator
             border_focused: 0x5294e2,   // Blue
             border_unfocused: 0x3a3a3a, // Gray
         }
@@ -209,6 +215,8 @@ impl Wm {
             tab_focused_bg: parse_color(&user_config.colors.tab_focused_bg).unwrap_or(0x5294e2),
             tab_unfocused_bg: parse_color(&user_config.colors.tab_unfocused_bg).unwrap_or(0x3a3a3a),
             tab_text_color: parse_color(&user_config.colors.tab_text).unwrap_or(0xffffff),
+            tab_active_accent: parse_color(&user_config.colors.tab_active_accent).unwrap_or(0x5294e2),
+            tab_separator: parse_color(&user_config.colors.tab_separator).unwrap_or(0x4a4a4a),
             border_focused: parse_color(&user_config.colors.border_focused).unwrap_or(0x5294e2),
             border_unfocused: parse_color(&user_config.colors.border_unfocused).unwrap_or(0x3a3a3a),
         };
@@ -401,7 +409,35 @@ impl Wm {
         Ok(window)
     }
 
-    /// Draw the tab bar for a frame
+    /// Calculate tab widths based on window titles (Chrome-style content-based sizing)
+    /// Returns a vector of (x_position, width) for each tab
+    fn calculate_tab_layout(&self, frame_id: NodeId) -> Vec<(i16, u32)> {
+        const MIN_TAB_WIDTH: u32 = 80;
+        const MAX_TAB_WIDTH: u32 = 200;
+        const CHAR_WIDTH: u32 = 7;  // Approximate pixels per character
+        const H_PADDING: u32 = 24;  // Total horizontal padding (12px each side)
+
+        let frame = match self.layout.get(frame_id).and_then(|n| n.as_frame()) {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        let mut result = Vec::new();
+        let mut x_offset: i16 = 0;
+
+        for &client_window in &frame.windows {
+            let title = self.get_window_title(client_window);
+            let title_width = title.chars().count() as u32 * CHAR_WIDTH;
+            let tab_width = (title_width + H_PADDING).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
+
+            result.push((x_offset, tab_width));
+            x_offset += tab_width as i16;
+        }
+
+        result
+    }
+
+    /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
     fn draw_tab_bar(&self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
         let frame = match self.layout.get(frame_id).and_then(|n| n.as_frame()) {
             Some(f) => f,
@@ -410,6 +446,8 @@ impl Wm {
 
         let num_tabs = frame.windows.len();
         let height = self.config.tab_bar_height;
+        let accent_height: u32 = 3; // Chrome-style top accent
+        let h_padding: i16 = 12;    // Horizontal text padding
 
         // Clear the background
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
@@ -429,12 +467,14 @@ impl Wm {
             return Ok(());
         }
 
-        let tab_width = rect.width / num_tabs as u32;
+        // Get tab layout (content-based widths, left-aligned)
+        let tab_layout = self.calculate_tab_layout(frame_id);
 
         // Draw each tab
         for (i, &client_window) in frame.windows.iter().enumerate() {
-            let x = (i as u32 * tab_width) as i16;
+            let (x, tab_width) = tab_layout[i];
             let is_focused = i == frame.focused;
+            let is_last = i == num_tabs - 1;
 
             // Tab background
             let bg_color = if is_focused {
@@ -442,29 +482,66 @@ impl Wm {
             } else {
                 self.config.tab_unfocused_bg
             };
+
+            // Draw tab background
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
             self.conn.poly_fill_rectangle(
                 window,
                 self.gc,
                 &[Rectangle {
-                    x: x + 1,
-                    y: 1,
-                    width: (tab_width - 2) as u16,
-                    height: (height - 2) as u16,
+                    x,
+                    y: accent_height as i16,
+                    width: tab_width as u16,
+                    height: (height - accent_height) as u16,
                 }],
             )?;
 
-            // Get window title
-            let title = self.get_window_title(client_window);
-            let display_title: String = title.chars().take(20).collect();
+            if is_focused {
+                // Draw accent line on top for focused tab
+                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_active_accent))?;
+                self.conn.poly_fill_rectangle(
+                    window,
+                    self.gc,
+                    &[Rectangle {
+                        x,
+                        y: 0,
+                        width: tab_width as u16,
+                        height: accent_height as u16,
+                    }],
+                )?;
+            } else if !is_last {
+                // Draw separator on right edge for unfocused tabs
+                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
+                self.conn.poly_fill_rectangle(
+                    window,
+                    self.gc,
+                    &[Rectangle {
+                        x: x + tab_width as i16 - 1,
+                        y: (accent_height + 4) as i16,
+                        width: 1,
+                        height: (height - accent_height - 8) as u16,
+                    }],
+                )?;
+            }
 
-            // Draw text
+            // Get window title and truncate if needed
+            let title = self.get_window_title(client_window);
+            let max_chars = ((tab_width as i16 - h_padding * 2) / 7).max(3) as usize;
+            let display_title = if title.chars().count() > max_chars {
+                let truncated: String = title.chars().take(max_chars.saturating_sub(3)).collect();
+                format!("{}...", truncated)
+            } else {
+                title
+            };
+
+            // Draw text (vertically centered)
+            let text_y = (height / 2 + accent_height / 2 + 4) as i16;
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_text_color))?;
             self.conn.image_text8(
                 window,
                 self.gc,
-                x + 4,
-                (height - 5) as i16,
+                x + h_padding,
+                text_y,
                 display_title.as_bytes(),
             )?;
         }
@@ -1163,7 +1240,7 @@ impl Wm {
         let screen_rect = self.usable_screen();
         let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
 
-        for (fid, rect) in geometries {
+        for (fid, _rect) in geometries {
             if fid == frame_id {
                 if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
                     let num_tabs = frame.windows.len();
@@ -1171,11 +1248,14 @@ impl Wm {
                         break;
                     }
 
-                    // Calculate which tab was clicked
-                    let tab_width = rect.width / num_tabs as u32;
-                    let clicked_tab = (event.event_x as u32 / tab_width) as usize;
+                    // Calculate which tab was clicked using content-based layout
+                    let tab_layout = self.calculate_tab_layout(frame_id);
+                    let click_x = event.event_x as i16;
+                    let clicked_tab = tab_layout.iter().enumerate()
+                        .find(|(_, (x, w))| click_x >= *x && click_x < *x + *w as i16)
+                        .map(|(i, _)| i);
 
-                    if clicked_tab < num_tabs {
+                    if let Some(clicked_tab) = clicked_tab {
                         // Get the window at this tab
                         let window = frame.windows[clicked_tab];
 
@@ -1227,15 +1307,15 @@ impl Wm {
             if root_x >= tab_x && root_x < tab_x + geom.width as i16 &&
                root_y >= tab_y && root_y < tab_y + geom.height as i16 {
                 // Cursor is over this tab bar
-                // Calculate which tab position
-                if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
-                    let num_tabs = frame.windows.len();
-                    if num_tabs > 0 {
-                        let tab_width = geom.width as i16 / num_tabs as i16;
-                        let local_x = root_x - tab_x;
-                        let target_index = (local_x / tab_width) as usize;
-                        return Ok((Some(frame_id), Some(target_index.min(num_tabs - 1))));
-                    }
+                // Calculate which tab position using content-based layout
+                let tab_layout = self.calculate_tab_layout(frame_id);
+                let local_x = root_x - tab_x;
+                let target_index = tab_layout.iter().enumerate()
+                    .find(|(_, (x, w))| local_x >= *x && local_x < *x + *w as i16)
+                    .map(|(i, _)| i);
+
+                if let Some(idx) = target_index {
+                    return Ok((Some(frame_id), Some(idx)));
                 }
                 return Ok((Some(frame_id), None));
             }

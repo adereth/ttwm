@@ -42,6 +42,8 @@ pub struct ColorConfig {
     pub tab_focused_bg: String,
     pub tab_unfocused_bg: String,
     pub tab_text: String,
+    pub tab_active_accent: String,
+    pub tab_separator: String,
     pub border_focused: String,
     pub border_unfocused: String,
 }
@@ -295,7 +297,7 @@ impl Default for AppearanceConfig {
             gap: 8,
             outer_gap: 8,
             border_width: 2,
-            tab_bar_height: 20,
+            tab_bar_height: 28,
         }
     }
 }
@@ -307,6 +309,8 @@ impl Default for ColorConfig {
             tab_focused_bg: "#5294e2".to_string(),
             tab_unfocused_bg: "#3a3a3a".to_string(),
             tab_text: "#ffffff".to_string(),
+            tab_active_accent: "#5294e2".to_string(),
+            tab_separator: "#4a4a4a".to_string(),
             border_focused: "#5294e2".to_string(),
             border_unfocused: "#3a3a3a".to_string(),
         }
