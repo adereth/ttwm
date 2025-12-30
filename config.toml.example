@@ -1,0 +1,69 @@
+# ttwm configuration file
+# Copy to ~/.config/ttwm/config.toml and customize
+
+[general]
+# Terminal emulator to spawn with Mod4+Return
+terminal = "alacritty"
+
+[appearance]
+# Gap between windows (pixels)
+gap = 8
+# Gap from screen edges (pixels)
+outer_gap = 8
+# Window border width (pixels)
+border_width = 2
+# Tab bar height (pixels)
+tab_bar_height = 20
+
+[colors]
+# Colors in hex format (#RRGGBB)
+tab_bar_bg = "#2e2e2e"
+tab_focused_bg = "#5294e2"
+tab_unfocused_bg = "#3a3a3a"
+tab_text = "#ffffff"
+border_focused = "#5294e2"
+border_unfocused = "#3a3a3a"
+
+[keybindings]
+# Format: "Modifier+Key" where Modifier is Mod4/Super, Shift, Control, Alt
+# Key names: a-z, 0-9, Return, Tab, Escape, Space, etc.
+
+# Terminal
+spawn_terminal = "Mod4+Return"
+
+# Tab navigation
+cycle_tab_forward = "Mod4+Tab"
+cycle_tab_backward = "Mod4+Shift+Tab"
+focus_tab_1 = "Mod4+1"
+focus_tab_2 = "Mod4+2"
+focus_tab_3 = "Mod4+3"
+focus_tab_4 = "Mod4+4"
+focus_tab_5 = "Mod4+5"
+focus_tab_6 = "Mod4+6"
+focus_tab_7 = "Mod4+7"
+focus_tab_8 = "Mod4+8"
+focus_tab_9 = "Mod4+9"
+
+# Window focus
+focus_next = "Mod4+j"
+focus_prev = "Mod4+k"
+
+# Frame navigation
+focus_frame_left = "Mod4+h"
+focus_frame_right = "Mod4+l"
+
+# Move windows between frames
+move_window_left = "Mod4+Shift+h"
+move_window_right = "Mod4+Shift+l"
+
+# Resize splits
+resize_shrink = "Mod4+Control+h"
+resize_grow = "Mod4+Control+l"
+
+# Splitting
+split_horizontal = "Mod4+s"
+split_vertical = "Mod4+v"
+
+# Window management
+close_window = "Mod4+q"
+quit = "Mod4+Shift+q"
