@@ -21,6 +21,7 @@ use x11rb::wrapper::ConnectionExt as _;
 
 use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
 use layout::{LayoutTree, NodeId, Rect, SplitDirection};
+use state::{StateTransition, UnmanageReason};
 use tracing::EventTracer;
 
 /// EWMH atoms we need
@@ -797,6 +798,14 @@ impl Wm {
         // Add to the focused frame in our layout
         self.layout.add_window(window);
 
+        // Trace the window being managed
+        if let Some(frame_id) = self.layout.find_window(window) {
+            self.tracer.trace_transition(&StateTransition::WindowManaged {
+                window,
+                frame: format!("{:?}", frame_id),
+            });
+        }
+
         // Apply layout to position all windows
         self.apply_layout()?;
 
@@ -814,6 +823,14 @@ impl Wm {
     fn unmanage_window(&mut self, window: Window) {
         // Remove from hidden set if present
         self.hidden_windows.remove(&window);
+
+        // Trace before removing
+        if self.layout.find_window(window).is_some() {
+            self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
+                window,
+                reason: UnmanageReason::ClientDestroyed,
+            });
+        }
 
         if let Some(_frame_id) = self.layout.remove_window(window) {
             log::info!("Unmanaging window 0x{:x}", window);
@@ -882,7 +899,19 @@ impl Wm {
 
     /// Cycle tabs within the focused frame
     fn cycle_tab(&mut self, forward: bool) -> Result<()> {
+        // Capture old tab index for tracing
+        let old_tab = self.layout.focused_frame().map(|f| f.focused);
+
         if let Some(window) = self.layout.cycle_tab(forward) {
+            // Trace the tab switch
+            if let (Some(old), Some(frame)) = (old_tab, self.layout.focused_frame()) {
+                self.tracer.trace_transition(&StateTransition::TabSwitched {
+                    frame: format!("{:?}", self.layout.focused),
+                    from: old,
+                    to: frame.focused,
+                });
+            }
+
             self.apply_layout()?;
             self.focus_window(window)?;
             log::info!("Cycled to {} tab", if forward { "next" } else { "previous" });
@@ -892,7 +921,21 @@ impl Wm {
 
     /// Focus a specific tab by number (1-based for user, 0-based internally)
     fn focus_tab(&mut self, num: usize) -> Result<()> {
+        // Capture old tab index for tracing
+        let old_tab = self.layout.focused_frame().map(|f| f.focused);
+
         if let Some(window) = self.layout.focus_tab(num.saturating_sub(1)) {
+            // Trace the tab switch
+            if let (Some(old), Some(frame)) = (old_tab, self.layout.focused_frame()) {
+                if old != frame.focused {
+                    self.tracer.trace_transition(&StateTransition::TabSwitched {
+                        frame: format!("{:?}", self.layout.focused),
+                        from: old,
+                        to: frame.focused,
+                    });
+                }
+            }
+
             self.apply_layout()?;
             self.focus_window(window)?;
             log::info!("Focused tab {}", num);
@@ -902,7 +945,17 @@ impl Wm {
 
     /// Split the focused frame
     fn split_focused(&mut self, direction: SplitDirection) -> Result<()> {
+        let old_frame = self.layout.focused;
         self.layout.split_focused(direction);
+        let new_frame = self.layout.focused;
+
+        // Trace the split
+        self.tracer.trace_transition(&StateTransition::FrameSplit {
+            original_frame: format!("{:?}", old_frame),
+            new_frame: format!("{:?}", new_frame),
+            direction: format!("{:?}", direction),
+        });
+
         self.apply_layout()?;
         log::info!("Split {:?}", direction);
         Ok(())
@@ -923,6 +976,9 @@ impl Wm {
 
     /// Focus a window
     fn focus_window(&mut self, window: Window) -> Result<()> {
+        // Capture old focus for tracing
+        let old_focused = self.focused_window;
+
         // Unfocus the previously focused window
         if let Some(old) = self.focused_window {
             if old != window && self.layout.find_window(old).is_some() {
@@ -951,6 +1007,14 @@ impl Wm {
         )?;
 
         self.focused_window = Some(window);
+
+        // Trace focus change
+        if old_focused != Some(window) {
+            self.tracer.trace_transition(&StateTransition::FocusChanged {
+                from: old_focused,
+                to: Some(window),
+            });
+        }
 
         // Also update the layout's focused frame to match
         if let Some(frame_id) = self.layout.find_window(window) {
@@ -1003,11 +1067,13 @@ impl Wm {
     fn handle_event(&mut self, event: Event) -> Result<()> {
         match event {
             Event::MapRequest(e) => {
+                self.tracer.trace_x11_event("MapRequest", Some(e.window), "");
                 log::debug!("MapRequest for window 0x{:x}", e.window);
                 self.manage_window(e.window)?;
             }
 
             Event::UnmapNotify(e) => {
+                self.tracer.trace_x11_event("UnmapNotify", Some(e.window), "");
                 log::debug!("UnmapNotify for window 0x{:x}", e.window);
                 // Only unmanage if the event is about a window we manage
                 // and not from a reparent operation
@@ -1018,11 +1084,13 @@ impl Wm {
             }
 
             Event::DestroyNotify(e) => {
+                self.tracer.trace_x11_event("DestroyNotify", Some(e.window), "");
                 log::debug!("DestroyNotify for window 0x{:x}", e.window);
                 self.unmanage_window(e.window);
             }
 
             Event::ConfigureRequest(e) => {
+                self.tracer.trace_x11_event("ConfigureRequest", Some(e.window), "");
                 // For now, allow all configure requests
                 log::debug!("ConfigureRequest for window 0x{:x}", e.window);
 
@@ -1038,6 +1106,7 @@ impl Wm {
             }
 
             Event::EnterNotify(e) => {
+                self.tracer.trace_x11_event("EnterNotify", Some(e.event), "");
                 // Focus follows mouse
                 if self.layout.find_window(e.event).is_some() {
                     log::debug!("EnterNotify for window 0x{:x}", e.event);
@@ -1046,15 +1115,18 @@ impl Wm {
             }
 
             Event::KeyPress(e) => {
+                self.tracer.trace_x11_event("KeyPress", None, &format!("keycode={}", e.detail));
                 self.handle_key_press(e)?;
             }
 
             Event::Expose(e) => {
+                self.tracer.trace_x11_event("Expose", Some(e.window), "");
                 // Redraw tab bar if it's one of ours
                 self.handle_expose(e)?;
             }
 
             Event::ButtonPress(e) => {
+                self.tracer.trace_x11_event("ButtonPress", Some(e.event), &format!("button={}", e.detail));
                 // Handle clicks on tab bars
                 self.handle_button_press(e)?;
             }
@@ -1144,6 +1216,12 @@ impl Wm {
     fn resize_split(&mut self, grow: bool) -> Result<()> {
         let delta = if grow { 0.05 } else { -0.05 };
         if self.layout.resize_focused_split(delta) {
+            // Trace the resize (simplified - we don't track exact ratios)
+            self.tracer.trace_transition(&StateTransition::SplitResized {
+                split: format!("{:?}", self.layout.focused),
+                old_ratio: 0.5, // placeholder
+                new_ratio: 0.5 + delta,
+            });
             self.apply_layout()?;
             log::info!("Resized split by {}", delta);
         }
@@ -1152,7 +1230,18 @@ impl Wm {
 
     /// Move the focused window to an adjacent frame
     fn move_window(&mut self, forward: bool) -> Result<()> {
+        // Capture source frame before move
+        let from_frame = self.layout.focused;
+
         if let Some(window) = self.layout.move_window_to_adjacent(forward) {
+            // Trace the move
+            let to_frame = self.layout.focused;
+            self.tracer.trace_transition(&StateTransition::WindowMoved {
+                window,
+                from_frame: format!("{:?}", from_frame),
+                to_frame: format!("{:?}", to_frame),
+            });
+
             // Clean up empty frames
             self.layout.remove_empty_frames();
             self.apply_layout()?;
@@ -1354,7 +1443,10 @@ impl Wm {
     fn handle_ipc(&mut self, cmd: IpcCommand) -> IpcResponse {
         log::debug!("Handling IPC command: {:?}", cmd);
 
-        match cmd {
+        // Capture command name for tracing
+        let cmd_name = format!("{:?}", cmd);
+
+        let response = match cmd {
             IpcCommand::GetState => {
                 IpcResponse::State {
                     data: self.snapshot_state(),
@@ -1489,7 +1581,17 @@ impl Wm {
                 self.running = false;
                 IpcResponse::Ok
             }
-        }
+        };
+
+        // Trace the IPC interaction
+        let result_status = match &response {
+            IpcResponse::Ok => "ok",
+            IpcResponse::Error { .. } => "error",
+            _ => "success",
+        };
+        self.tracer.trace_ipc(&cmd_name, result_status);
+
+        response
     }
 
     /// Create a snapshot of the current WM state for IPC
