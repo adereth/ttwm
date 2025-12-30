@@ -409,11 +409,6 @@ impl Wm {
         };
 
         let num_tabs = frame.windows.len();
-        if num_tabs == 0 {
-            return Ok(());
-        }
-
-        let tab_width = rect.width / num_tabs as u32;
         let height = self.config.tab_bar_height;
 
         // Clear the background
@@ -428,6 +423,13 @@ impl Wm {
                 height: height as u16,
             }],
         )?;
+
+        // Empty frame - just show background
+        if num_tabs == 0 {
+            return Ok(());
+        }
+
+        let tab_width = rect.width / num_tabs as u32;
 
         // Draw each tab
         for (i, &client_window) in frame.windows.iter().enumerate() {
@@ -542,7 +544,8 @@ impl Wm {
                 let tab_bar_height = self.config.tab_bar_height;
 
                 // Calculate client area (below tab bar)
-                let has_tabs = frame.windows.len() >= 1;
+                // Always show tab bar, even for empty frames (to allow middle-click removal)
+                let has_tabs = true;
                 let client_y = if has_tabs {
                     rect.y + tab_bar_height as i32
                 } else {
