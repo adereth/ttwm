@@ -1266,9 +1266,6 @@ impl Wm {
                 // Move to different frame
                 self.layout.move_window_to_frame(drag.window, drag.source_frame, target_frame);
 
-                // Clean up empty frames
-                self.layout.remove_empty_frames();
-
                 log::info!("Moved window 0x{:x} to different frame", drag.window);
             }
 
