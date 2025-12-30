@@ -24,6 +24,7 @@ use layout::{LayoutTree, NodeId, Rect, SplitDirection};
 use tracing::EventTracer;
 
 /// EWMH atoms we need
+#[allow(dead_code)]
 struct Atoms {
     wm_protocols: Atom,
     wm_delete_window: Atom,

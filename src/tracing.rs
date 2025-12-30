@@ -6,7 +6,6 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 
 use crate::ipc::EventLogEntry;
 use crate::state::StateTransition;
@@ -15,6 +14,7 @@ use crate::state::StateTransition;
 const DEFAULT_MAX_ENTRIES: usize = 1000;
 
 /// Event tracer with ring buffer storage
+#[allow(dead_code)]
 pub struct EventTracer {
     entries: VecDeque<EventLogEntry>,
     max_entries: usize,
@@ -22,6 +22,7 @@ pub struct EventTracer {
     start_time: Instant,
 }
 
+#[allow(dead_code)]
 impl EventTracer {
     /// Create a new event tracer with default capacity
     pub fn new() -> Self {

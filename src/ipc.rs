@@ -280,10 +280,12 @@ impl IpcClient {
 }
 
 /// Client for connecting to the IPC server (used by ttwmctl)
+#[allow(dead_code)]
 pub struct IpcConnection {
     stream: UnixStream,
 }
 
+#[allow(dead_code)]
 impl IpcConnection {
     /// Connect to the WM's IPC socket
     pub fn connect() -> std::io::Result<Self> {

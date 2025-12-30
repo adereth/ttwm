@@ -56,6 +56,7 @@ impl Frame {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_window(window: Window) -> Self {
         Self {
             windows: vec![window],
@@ -123,6 +124,7 @@ impl Node {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_split(&self) -> Option<&Split> {
         match self {
             Node::Split(s) => Some(s),
@@ -286,7 +288,7 @@ impl LayoutTree {
     }
 
     /// Focus the next frame in the given direction
-    pub fn focus_direction(&mut self, direction: SplitDirection, forward: bool) -> bool {
+    pub fn focus_direction(&mut self, _direction: SplitDirection, forward: bool) -> bool {
         let frames = self.all_frames();
         if frames.len() <= 1 {
             return false;
@@ -339,8 +341,6 @@ impl LayoutTree {
     }
 
     fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32, gap: u32) -> (Rect, Rect) {
-        let half_gap = (gap / 2) as i32;
-
         match direction {
             SplitDirection::Horizontal => {
                 let first_width = ((rect.width as f32 * ratio) as u32).saturating_sub(gap / 2);
@@ -526,6 +526,7 @@ impl LayoutTree {
     }
 
     /// Get number of tabs in the focused frame
+    #[allow(dead_code)]
     pub fn tab_count(&self) -> usize {
         self.focused_frame().map(|f| f.windows.len()).unwrap_or(0)
     }
