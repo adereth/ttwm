@@ -2,7 +2,7 @@
 # Copy to ~/.config/ttwm/config.toml and customize
 
 [general]
-# Terminal emulator to spawn with Mod4+Return
+# Terminal emulator to spawn with Mod4+x
 terminal = "alacritty"
 
 [appearance]
@@ -26,14 +26,14 @@ border_unfocused = "#3a3a3a"
 
 [keybindings]
 # Format: "Modifier+Key" where Modifier is Mod4/Super, Shift, Control, Alt
-# Key names: a-z, 0-9, Return, Tab, Escape, Space, etc.
+# Key names: a-z, 0-9, Return, Tab, Page_Up, Page_Down, Left, Right, Up, Down, etc.
 
 # Terminal
-spawn_terminal = "Mod4+Return"
+spawn_terminal = "Mod4+x"
 
 # Tab navigation
-cycle_tab_forward = "Mod4+Tab"
-cycle_tab_backward = "Mod4+Shift+Tab"
+cycle_tab_forward = "Mod4+Page_Down"
+cycle_tab_backward = "Mod4+Page_Up"
 focus_tab_1 = "Mod4+1"
 focus_tab_2 = "Mod4+2"
 focus_tab_3 = "Mod4+3"
@@ -49,16 +49,16 @@ focus_next = "Mod4+j"
 focus_prev = "Mod4+k"
 
 # Frame navigation
-focus_frame_left = "Mod4+h"
-focus_frame_right = "Mod4+l"
+focus_frame_left = "Mod4+Left"
+focus_frame_right = "Mod4+Right"
 
 # Move windows between frames
-move_window_left = "Mod4+Shift+h"
-move_window_right = "Mod4+Shift+l"
+move_window_left = "Mod4+Shift+Left"
+move_window_right = "Mod4+Shift+Right"
 
 # Resize splits
-resize_shrink = "Mod4+Control+h"
-resize_grow = "Mod4+Control+l"
+resize_shrink = "Mod4+Control+Left"
+resize_grow = "Mod4+Control+Right"
 
 # Splitting
 split_horizontal = "Mod4+s"

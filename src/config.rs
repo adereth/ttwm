@@ -259,6 +259,15 @@ fn key_to_keysym(key: &str) -> Option<u32> {
         "8" => Some(0x38),
         "9" => Some(0x39),
         "0" => Some(0x30),
+        // Function/navigation keys
+        "page_up" | "pageup" | "pgup" | "prior" => Some(0xff55),
+        "page_down" | "pagedown" | "pgdn" | "next" => Some(0xff56),
+        "left" => Some(0xff51),
+        "up" => Some(0xff52),
+        "right" => Some(0xff53),
+        "down" => Some(0xff54),
+        "home" => Some(0xff50),
+        "end" => Some(0xff57),
         _ => {
             log::warn!("Unknown key: {}", key);
             None
@@ -307,17 +316,17 @@ impl Default for ColorConfig {
 impl Default for KeybindingConfig {
     fn default() -> Self {
         Self {
-            spawn_terminal: Some("Mod4+Return".to_string()),
-            cycle_tab_forward: Some("Mod4+Tab".to_string()),
-            cycle_tab_backward: Some("Mod4+Shift+Tab".to_string()),
+            spawn_terminal: Some("Mod4+x".to_string()),
+            cycle_tab_forward: Some("Mod4+Page_Down".to_string()),
+            cycle_tab_backward: Some("Mod4+Page_Up".to_string()),
             focus_next: Some("Mod4+j".to_string()),
             focus_prev: Some("Mod4+k".to_string()),
-            focus_frame_left: Some("Mod4+h".to_string()),
-            focus_frame_right: Some("Mod4+l".to_string()),
-            move_window_left: Some("Mod4+Shift+h".to_string()),
-            move_window_right: Some("Mod4+Shift+l".to_string()),
-            resize_shrink: Some("Mod4+Control+h".to_string()),
-            resize_grow: Some("Mod4+Control+l".to_string()),
+            focus_frame_left: Some("Mod4+Left".to_string()),
+            focus_frame_right: Some("Mod4+Right".to_string()),
+            move_window_left: Some("Mod4+Shift+Left".to_string()),
+            move_window_right: Some("Mod4+Shift+Right".to_string()),
+            resize_shrink: Some("Mod4+Control+Left".to_string()),
+            resize_grow: Some("Mod4+Control+Right".to_string()),
             split_horizontal: Some("Mod4+s".to_string()),
             split_vertical: Some("Mod4+v".to_string()),
             close_window: Some("Mod4+q".to_string()),
