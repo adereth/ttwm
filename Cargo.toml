@@ -1,0 +1,34 @@
+[package]
+name = "ttwm"
+version = "0.1.0"
+edition = "2021"
+description = "A tabbed tiling window manager for X11, inspired by Notion"
+license = "MIT"
+authors = ["Your Name <your.email@example.com>"]
+repository = "https://github.com/yourusername/ttwm"
+
+[dependencies]
+# X11 bindings - pure Rust implementation
+x11rb = { version = "0.13", features = ["randr", "xinerama", "cursor"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Arena-based tree storage
+slotmap = "1.0"
+
+# Will be added in later milestones:
+# serde = { version = "1", features = ["derive"] }  # Milestone 6: Config
+# toml = "0.8"              # Milestone 6: Config
+# tokio = { version = "1", features = ["rt", "net", "sync", "macros"] }  # Milestone 8: IPC
+# serde_json = "1"          # Milestone 8: IPC
+# clap = { version = "4", features = ["derive"] }   # CLI args
+
+[[bin]]
+name = "ttwm"
+path = "src/main.rs"
