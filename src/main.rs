@@ -437,6 +437,80 @@ impl Wm {
         result
     }
 
+    /// Draw a filled rectangle with rounded top corners
+    fn draw_rounded_top_rect(
+        &self,
+        window: Window,
+        x: i16,
+        y: i16,
+        width: u32,
+        height: u32,
+        radius: u32,
+    ) -> Result<()> {
+        let r = radius.min(width / 2).min(height / 2) as i16;
+        let w = width as i16;
+        let h = height as i16;
+
+        // Draw the main body (below the rounded corners)
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x,
+                y: y + r,
+                width: width as u16,
+                height: (h - r) as u16,
+            }],
+        )?;
+
+        // Draw the top middle section (between the two corners)
+        if w > 2 * r {
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: x + r,
+                    y,
+                    width: (w - 2 * r) as u16,
+                    height: r as u16,
+                }],
+            )?;
+        }
+
+        // Draw top-left corner arc (quarter circle)
+        // Arc angles are in 1/64th of a degree, starting from 3 o'clock going counterclockwise
+        // Top-left: start at 90°, sweep 90° counterclockwise
+        self.conn.poly_fill_arc(
+            window,
+            self.gc,
+            &[Arc {
+                x,
+                y,
+                width: (2 * r) as u16,
+                height: (2 * r) as u16,
+                angle1: 90 * 64,  // Start at 12 o'clock
+                angle2: 90 * 64,  // Sweep 90° counterclockwise to 9 o'clock
+            }],
+        )?;
+
+        // Draw top-right corner arc
+        // Top-right: start at 0°, sweep 90° counterclockwise
+        self.conn.poly_fill_arc(
+            window,
+            self.gc,
+            &[Arc {
+                x: x + w - 2 * r,
+                y,
+                width: (2 * r) as u16,
+                height: (2 * r) as u16,
+                angle1: 0,        // Start at 3 o'clock
+                angle2: 90 * 64,  // Sweep 90° counterclockwise to 12 o'clock
+            }],
+        )?;
+
+        Ok(())
+    }
+
     /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
     fn draw_tab_bar(&self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
         let frame = match self.layout.get(frame_id).and_then(|n| n.as_frame()) {
@@ -448,6 +522,7 @@ impl Wm {
         let height = self.config.tab_bar_height;
         let accent_height: u32 = 3; // Chrome-style top accent
         let h_padding: i16 = 12;    // Horizontal text padding
+        let corner_radius: u32 = 6; // Rounded corner radius
 
         // Clear the background
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
@@ -476,38 +551,34 @@ impl Wm {
             let is_focused = i == frame.focused;
             let is_last = i == num_tabs - 1;
 
-            // Tab background
+            // Tab background color
             let bg_color = if is_focused {
                 self.config.tab_focused_bg
             } else {
                 self.config.tab_unfocused_bg
             };
 
-            // Draw tab background
+            // Draw tab background with rounded top corners
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
-            self.conn.poly_fill_rectangle(
+            self.draw_rounded_top_rect(
                 window,
-                self.gc,
-                &[Rectangle {
-                    x,
-                    y: accent_height as i16,
-                    width: tab_width as u16,
-                    height: (height - accent_height) as u16,
-                }],
+                x,
+                accent_height as i16,
+                tab_width,
+                height - accent_height,
+                corner_radius,
             )?;
 
             if is_focused {
-                // Draw accent line on top for focused tab
+                // Draw accent line on top with rounded corners
                 self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_active_accent))?;
-                self.conn.poly_fill_rectangle(
+                self.draw_rounded_top_rect(
                     window,
-                    self.gc,
-                    &[Rectangle {
-                        x,
-                        y: 0,
-                        width: tab_width as u16,
-                        height: accent_height as u16,
-                    }],
+                    x,
+                    0,
+                    tab_width,
+                    accent_height + corner_radius, // Overlap with tab body
+                    corner_radius,
                 )?;
             } else if !is_last {
                 // Draw separator on right edge for unfocused tabs
