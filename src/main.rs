@@ -99,6 +99,16 @@ impl Default for LayoutConfig {
     }
 }
 
+/// Drag state for tab drag-and-drop
+struct DragState {
+    /// Window being dragged
+    window: Window,
+    /// Original frame the window was in
+    source_frame: NodeId,
+    /// Original tab index
+    source_index: usize,
+}
+
 /// The main window manager state
 struct Wm {
     conn: RustConnection,
@@ -129,6 +139,8 @@ struct Wm {
     user_config: Config,
     /// Parsed keybindings (action -> binding)
     keybindings: HashMap<WmAction, ParsedBinding>,
+    /// Current drag operation (if any)
+    drag_state: Option<DragState>,
 }
 
 impl Wm {
@@ -218,6 +230,7 @@ impl Wm {
             tracer: EventTracer::new(),
             user_config,
             keybindings,
+            drag_state: None,
         })
     }
 
@@ -379,7 +392,7 @@ impl Wm {
             x11rb::COPY_FROM_PARENT,
             &CreateWindowAux::new()
                 .background_pixel(self.config.tab_bar_bg)
-                .event_mask(EventMask::EXPOSURE | EventMask::BUTTON_PRESS),
+                .event_mask(EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
         )?;
 
         self.conn.map_window(window)?;
@@ -745,6 +758,16 @@ impl Wm {
 
     /// Unmanage a window
     fn unmanage_window(&mut self, window: Window) {
+        // Cancel drag if we're dragging this window
+        if let Some(ref drag) = self.drag_state {
+            if drag.window == window {
+                // Ungrab pointer and clear drag state
+                let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
+                self.drag_state = None;
+                log::info!("Cancelled drag - dragged window was destroyed");
+            }
+        }
+
         // Remove from hidden set if present
         self.hidden_windows.remove(&window);
 
@@ -1056,6 +1079,17 @@ impl Wm {
                 self.handle_button_press(e)?;
             }
 
+            Event::ButtonRelease(e) => {
+                self.tracer.trace_x11_event("ButtonRelease", Some(e.event), &format!("button={}", e.detail));
+                // Handle end of drag
+                self.handle_button_release(e)?;
+            }
+
+            Event::MotionNotify(_e) => {
+                // Motion events are received during drag but we don't need to process them
+                // The drop target is determined at button release time
+            }
+
             _ => {
                 // Ignore other events for now
             }
@@ -1122,16 +1156,126 @@ impl Wm {
                     let clicked_tab = (event.event_x as u32 / tab_width) as usize;
 
                     if clicked_tab < num_tabs {
-                        // Focus this tab
-                        if let Some(window) = self.layout.focus_tab(clicked_tab) {
+                        // Get the window at this tab
+                        let window = frame.windows[clicked_tab];
+
+                        // Focus this tab immediately
+                        if let Some(w) = self.layout.focus_tab(clicked_tab) {
                             self.apply_layout()?;
-                            self.focus_window(window)?;
-                            log::info!("Clicked tab {}", clicked_tab + 1);
+                            self.focus_window(w)?;
                         }
+
+                        // Start drag operation - grab pointer to track motion
+                        self.conn.grab_pointer(
+                            false,
+                            self.root,
+                            EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                            GrabMode::ASYNC,
+                            GrabMode::ASYNC,
+                            x11rb::NONE,  // confine_to
+                            x11rb::NONE,  // cursor
+                            x11rb::CURRENT_TIME,
+                        )?;
+
+                        self.drag_state = Some(DragState {
+                            window,
+                            source_frame: frame_id,
+                            source_index: clicked_tab,
+                        });
+
+                        log::info!("Started drag for tab {} (window 0x{:x})", clicked_tab + 1, window);
                     }
                 }
                 break;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Find the drop target for a drag operation
+    /// Returns (frame_id, tab_index) - tab_index is the position to insert at
+    fn find_drop_target(&self, root_x: i16, root_y: i16) -> Result<(Option<NodeId>, Option<usize>)> {
+        // Check each tab bar window first (higher priority than content area)
+        for (&frame_id, &tab_window) in &self.tab_bar_windows {
+            let geom = self.conn.get_geometry(tab_window)?.reply()?;
+            let coords = self.conn.translate_coordinates(tab_window, self.root, 0, 0)?.reply()?;
+
+            let tab_x = coords.dst_x as i16;
+            let tab_y = coords.dst_y as i16;
+
+            if root_x >= tab_x && root_x < tab_x + geom.width as i16 &&
+               root_y >= tab_y && root_y < tab_y + geom.height as i16 {
+                // Cursor is over this tab bar
+                // Calculate which tab position
+                if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
+                    let num_tabs = frame.windows.len();
+                    if num_tabs > 0 {
+                        let tab_width = geom.width as i16 / num_tabs as i16;
+                        let local_x = root_x - tab_x;
+                        let target_index = (local_x / tab_width) as usize;
+                        return Ok((Some(frame_id), Some(target_index.min(num_tabs - 1))));
+                    }
+                }
+                return Ok((Some(frame_id), None));
+            }
+        }
+
+        // Check frame content areas (for dropping into single-window frames or frames without visible tab bars)
+        let screen_rect = self.usable_screen();
+        let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+
+        for (frame_id, rect) in geometries {
+            if (root_x as i32) >= rect.x && (root_x as i32) < rect.x + rect.width as i32 &&
+               (root_y as i32) >= rect.y && (root_y as i32) < rect.y + rect.height as i32 {
+                return Ok((Some(frame_id), None));
+            }
+        }
+
+        Ok((None, None))
+    }
+
+    /// Handle button release event (end of drag)
+    fn handle_button_release(&mut self, event: ButtonReleaseEvent) -> Result<()> {
+        // Only handle left button
+        if event.detail != 1 {
+            return Ok(());
+        }
+
+        // Ungrab pointer
+        self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?;
+
+        let drag = match self.drag_state.take() {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        // Find what's under the cursor at root coordinates
+        let (target_frame, target_index) = self.find_drop_target(event.root_x, event.root_y)?;
+
+        if let Some(target_frame) = target_frame {
+            if target_frame == drag.source_frame {
+                // Reorder within same frame
+                if let Some(target_idx) = target_index {
+                    if target_idx != drag.source_index {
+                        self.layout.reorder_tab(target_frame, drag.source_index, target_idx);
+                        log::info!("Reordered tab from {} to {}", drag.source_index + 1, target_idx + 1);
+                    }
+                }
+            } else {
+                // Move to different frame
+                self.layout.move_window_to_frame(drag.window, drag.source_frame, target_frame);
+
+                // Clean up empty frames
+                self.layout.remove_empty_frames();
+
+                log::info!("Moved window 0x{:x} to different frame", drag.window);
+            }
+
+            self.apply_layout()?;
+            self.focus_window(drag.window)?;
+        } else {
+            log::info!("Drag cancelled - released outside any frame");
         }
 
         Ok(())

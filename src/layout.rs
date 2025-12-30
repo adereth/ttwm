@@ -525,6 +525,62 @@ impl LayoutTree {
         }
     }
 
+    /// Reorder a tab within a frame (move from_index to to_index)
+    pub fn reorder_tab(&mut self, frame_id: NodeId, from_index: usize, to_index: usize) -> bool {
+        if let Some(Node::Frame(frame)) = self.nodes.get_mut(frame_id) {
+            if from_index >= frame.windows.len() || to_index >= frame.windows.len() {
+                return false;
+            }
+            if from_index == to_index {
+                return false;
+            }
+
+            let window = frame.windows.remove(from_index);
+            frame.windows.insert(to_index, window);
+
+            // Adjust focused index if needed
+            if frame.focused == from_index {
+                frame.focused = to_index;
+            } else if from_index < frame.focused && to_index >= frame.focused {
+                frame.focused -= 1;
+            } else if from_index > frame.focused && to_index <= frame.focused {
+                frame.focused += 1;
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move a window from source frame to target frame
+    pub fn move_window_to_frame(
+        &mut self,
+        window: Window,
+        source_frame: NodeId,
+        target_frame: NodeId,
+    ) -> bool {
+        // Remove from source
+        if let Some(Node::Frame(frame)) = self.nodes.get_mut(source_frame) {
+            if !frame.remove_window(window) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        // Add to target
+        if let Some(Node::Frame(frame)) = self.nodes.get_mut(target_frame) {
+            frame.add_window(window);
+        } else {
+            return false;
+        }
+
+        // Update focused frame
+        self.focused = target_frame;
+        true
+    }
+
     /// Get number of tabs in the focused frame
     #[allow(dead_code)]
     pub fn tab_count(&self) -> usize {
@@ -1111,5 +1167,136 @@ mod tests {
         assert!(all.contains(&1001));
         assert!(all.contains(&1002));
         assert!(all.contains(&1003));
+    }
+
+    // ==================== Tab Reorder Tests ====================
+
+    #[test]
+    fn test_reorder_tab_forward() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        let frame_id = tree.focused;
+
+        // Move tab 0 to position 2
+        assert!(tree.reorder_tab(frame_id, 0, 2));
+
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.windows, vec![1002, 1003, 1001]);
+    }
+
+    #[test]
+    fn test_reorder_tab_backward() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        let frame_id = tree.focused;
+
+        // Move tab 2 to position 0
+        assert!(tree.reorder_tab(frame_id, 2, 0));
+
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.windows, vec![1003, 1001, 1002]);
+    }
+
+    #[test]
+    fn test_reorder_tab_same_position() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+
+        let frame_id = tree.focused;
+
+        // Reorder to same position should return false
+        assert!(!tree.reorder_tab(frame_id, 0, 0));
+    }
+
+    #[test]
+    fn test_reorder_tab_out_of_bounds() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+
+        let frame_id = tree.focused;
+
+        // Out of bounds should return false
+        assert!(!tree.reorder_tab(frame_id, 0, 5));
+        assert!(!tree.reorder_tab(frame_id, 5, 0));
+    }
+
+    #[test]
+    fn test_reorder_tab_updates_focus() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        let frame_id = tree.focused;
+
+        // Focus is on 1003 (index 2), move it to position 0
+        assert!(tree.reorder_tab(frame_id, 2, 0));
+
+        let frame = tree.focused_frame().unwrap();
+        // Focus should follow the moved window
+        assert_eq!(frame.focused, 0);
+        assert_eq!(frame.focused_window(), Some(1003));
+    }
+
+    // ==================== Move Window to Frame Tests ====================
+
+    #[test]
+    fn test_move_window_to_frame() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+
+        let source_frame = tree.focused;
+        tree.split_focused(SplitDirection::Horizontal);
+        let target_frame = tree.focused;
+
+        // Move window 1001 from source to target
+        assert!(tree.move_window_to_frame(1001, source_frame, target_frame));
+
+        // Source frame should have only 1002
+        if let Some(Node::Frame(frame)) = tree.get(source_frame) {
+            assert_eq!(frame.windows, vec![1002]);
+        }
+
+        // Target frame should have 1001
+        if let Some(Node::Frame(frame)) = tree.get(target_frame) {
+            assert!(frame.windows.contains(&1001));
+        }
+    }
+
+    #[test]
+    fn test_move_window_to_frame_updates_focus() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        let source_frame = tree.focused;
+        tree.split_focused(SplitDirection::Horizontal);
+        let target_frame = tree.focused;
+
+        // Focus should change to target frame after move
+        tree.focused = source_frame;
+        assert!(tree.move_window_to_frame(1001, source_frame, target_frame));
+        assert_eq!(tree.focused, target_frame);
+    }
+
+    #[test]
+    fn test_move_window_nonexistent() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        let source_frame = tree.focused;
+        tree.split_focused(SplitDirection::Horizontal);
+        let target_frame = tree.focused;
+
+        // Moving nonexistent window should fail
+        assert!(!tree.move_window_to_frame(9999, source_frame, target_frame));
     }
 }
