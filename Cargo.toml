@@ -32,8 +32,9 @@ clap = { version = "4", features = ["derive"] }
 # Image encoding for screenshots (use minimal features to avoid dependency issues)
 image = { version = "0.24", default-features = false, features = ["png"] }
 
-# Will be added in later milestones:
-# toml = "0.8"              # Milestone 6: Config
+# Configuration file support
+toml = "0.8"
+dirs = "5"
 
 [[bin]]
 name = "ttwm"

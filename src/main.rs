@@ -4,6 +4,7 @@
 //! Milestone 5: Tabs with tab bar rendering.
 //! Milestone 6: IPC interface for debugability and scriptability.
 
+mod config;
 mod ipc;
 mod layout;
 mod state;
@@ -19,6 +20,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+use config::{parse_color, Config, ParsedBinding, WmAction};
 use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
 use layout::{LayoutTree, NodeId, Rect, SplitDirection};
 use state::{StateTransition, UnmanageReason};
@@ -123,6 +125,10 @@ struct Wm {
     ipc: Option<IpcServer>,
     /// Event tracer for debugging
     tracer: EventTracer,
+    /// User configuration
+    user_config: Config,
+    /// Parsed keybindings (action -> binding)
+    keybindings: HashMap<WmAction, ParsedBinding>,
 }
 
 impl Wm {
@@ -177,6 +183,24 @@ impl Wm {
             }
         };
 
+        // Load user configuration
+        let user_config = Config::load();
+        let keybindings = user_config.parse_keybindings();
+
+        // Build LayoutConfig from user config
+        let config = LayoutConfig {
+            gap: user_config.appearance.gap,
+            outer_gap: user_config.appearance.outer_gap,
+            border_width: user_config.appearance.border_width,
+            tab_bar_height: user_config.appearance.tab_bar_height,
+            tab_bar_bg: parse_color(&user_config.colors.tab_bar_bg).unwrap_or(0x2e2e2e),
+            tab_focused_bg: parse_color(&user_config.colors.tab_focused_bg).unwrap_or(0x5294e2),
+            tab_unfocused_bg: parse_color(&user_config.colors.tab_unfocused_bg).unwrap_or(0x3a3a3a),
+            tab_text_color: parse_color(&user_config.colors.tab_text).unwrap_or(0xffffff),
+            border_focused: parse_color(&user_config.colors.border_focused).unwrap_or(0x5294e2),
+            border_unfocused: parse_color(&user_config.colors.border_unfocused).unwrap_or(0x3a3a3a),
+        };
+
         Ok(Self {
             conn,
             screen_num,
@@ -185,13 +209,15 @@ impl Wm {
             layout: LayoutTree::new(),
             focused_window: None,
             check_window,
-            config: LayoutConfig::default(),
+            config,
             tab_bar_windows: HashMap::new(),
             hidden_windows: std::collections::HashSet::new(),
             gc,
             running: true,
             ipc,
             tracer: EventTracer::new(),
+            user_config,
+            keybindings,
         })
     }
 
@@ -574,149 +600,47 @@ impl Wm {
 
     /// Grab keys we want to handle
     fn grab_keys(&self) -> Result<()> {
-        // We need to grab keys on the root window
-        // Mod4 = Super/Windows key (modifier mask 64)
-        let mod_key = ModMask::M4;
-
         // Get keyboard mapping to find keycodes
         let setup = self.conn.setup();
         let min_keycode = setup.min_keycode;
         let max_keycode = setup.max_keycode;
 
-        let mapping = self.conn.get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
+        let mapping = self
+            .conn
+            .get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
             .reply()?;
 
         let keysyms_per_keycode = mapping.keysyms_per_keycode as usize;
 
-        // Keysym constants
-        const XK_RETURN: u32 = 0xff0d;
-        const XK_TAB: u32 = 0xff09;
-        const XK_Q: u32 = 0x71;
-        const XK_J: u32 = 0x6a;
-        const XK_K: u32 = 0x6b;
-        const XK_H: u32 = 0x68;
-        const XK_L: u32 = 0x6c;
-        const XK_S: u32 = 0x73;
-        const XK_V: u32 = 0x76;
-        const XK_1: u32 = 0x31;
-        const XK_2: u32 = 0x32;
-        const XK_3: u32 = 0x33;
-        const XK_4: u32 = 0x34;
-        const XK_5: u32 = 0x35;
-        const XK_6: u32 = 0x36;
-        const XK_7: u32 = 0x37;
-        const XK_8: u32 = 0x38;
-        const XK_9: u32 = 0x39;
-
-        let mut return_keycode: Option<Keycode> = None;
-        let mut tab_keycode: Option<Keycode> = None;
-        let mut q_keycode: Option<Keycode> = None;
-        let mut j_keycode: Option<Keycode> = None;
-        let mut k_keycode: Option<Keycode> = None;
-        let mut h_keycode: Option<Keycode> = None;
-        let mut l_keycode: Option<Keycode> = None;
-        let mut s_keycode: Option<Keycode> = None;
-        let mut v_keycode: Option<Keycode> = None;
-        let mut num_keycodes: [Option<Keycode>; 9] = [None; 9];
-
+        // Build keysym -> keycode map
+        let mut keysym_to_keycode: HashMap<u32, Keycode> = HashMap::new();
         for (i, chunk) in mapping.keysyms.chunks(keysyms_per_keycode).enumerate() {
             for keysym in chunk {
-                match *keysym {
-                    XK_RETURN => return_keycode = Some(min_keycode + i as u8),
-                    XK_TAB => tab_keycode = Some(min_keycode + i as u8),
-                    XK_Q => q_keycode = Some(min_keycode + i as u8),
-                    XK_J => j_keycode = Some(min_keycode + i as u8),
-                    XK_K => k_keycode = Some(min_keycode + i as u8),
-                    XK_H => h_keycode = Some(min_keycode + i as u8),
-                    XK_L => l_keycode = Some(min_keycode + i as u8),
-                    XK_S => s_keycode = Some(min_keycode + i as u8),
-                    XK_V => v_keycode = Some(min_keycode + i as u8),
-                    XK_1 => num_keycodes[0] = Some(min_keycode + i as u8),
-                    XK_2 => num_keycodes[1] = Some(min_keycode + i as u8),
-                    XK_3 => num_keycodes[2] = Some(min_keycode + i as u8),
-                    XK_4 => num_keycodes[3] = Some(min_keycode + i as u8),
-                    XK_5 => num_keycodes[4] = Some(min_keycode + i as u8),
-                    XK_6 => num_keycodes[5] = Some(min_keycode + i as u8),
-                    XK_7 => num_keycodes[6] = Some(min_keycode + i as u8),
-                    XK_8 => num_keycodes[7] = Some(min_keycode + i as u8),
-                    XK_9 => num_keycodes[8] = Some(min_keycode + i as u8),
-                    _ => {}
+                if *keysym != 0 {
+                    keysym_to_keycode
+                        .entry(*keysym)
+                        .or_insert(min_keycode + i as u8);
                 }
             }
         }
 
-        // Grab Mod4+Return for spawning terminal
-        if let Some(keycode) = return_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+Return (keycode {})", keycode);
-        }
-
-        // Grab Mod4+Tab for cycling windows forward
-        if let Some(keycode) = tab_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+Tab (keycode {})", keycode);
-            // Also Mod4+Shift+Tab for cycling backward
-            self.grab_key(keycode, mod_key | ModMask::SHIFT)?;
-            log::info!("Grabbed Mod4+Shift+Tab (keycode {})", keycode);
-        }
-
-        // Grab Mod4+J/K for next/prev window
-        if let Some(keycode) = j_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+J (keycode {})", keycode);
-        }
-        if let Some(keycode) = k_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+K (keycode {})", keycode);
-        }
-
-        // Grab Mod4+Shift+Q for quitting
-        if let Some(keycode) = q_keycode {
-            self.grab_key(keycode, mod_key | ModMask::SHIFT)?;
-            log::info!("Grabbed Mod4+Shift+Q (keycode {})", keycode);
-
-            // Also grab Mod4+Q for closing windows
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+Q (keycode {})", keycode);
-        }
-
-        // Grab Mod4+H/L for focus left/right
-        if let Some(keycode) = h_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+H (keycode {})", keycode);
-            // Mod4+Shift+H for move window left
-            self.grab_key(keycode, mod_key | ModMask::SHIFT)?;
-            log::info!("Grabbed Mod4+Shift+H (keycode {})", keycode);
-            // Mod4+Ctrl+H for resize left
-            self.grab_key(keycode, mod_key | ModMask::CONTROL)?;
-            log::info!("Grabbed Mod4+Ctrl+H (keycode {})", keycode);
-        }
-        if let Some(keycode) = l_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+L (keycode {})", keycode);
-            // Mod4+Shift+L for move window right
-            self.grab_key(keycode, mod_key | ModMask::SHIFT)?;
-            log::info!("Grabbed Mod4+Shift+L (keycode {})", keycode);
-            // Mod4+Ctrl+L for resize right
-            self.grab_key(keycode, mod_key | ModMask::CONTROL)?;
-            log::info!("Grabbed Mod4+Ctrl+L (keycode {})", keycode);
-        }
-
-        // Grab Mod4+S for horizontal split, Mod4+V for vertical split
-        if let Some(keycode) = s_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+S (keycode {})", keycode);
-        }
-        if let Some(keycode) = v_keycode {
-            self.grab_key(keycode, mod_key)?;
-            log::info!("Grabbed Mod4+V (keycode {})", keycode);
-        }
-
-        // Grab Mod4+1-9 for tab selection
-        for (i, keycode) in num_keycodes.iter().enumerate() {
-            if let Some(kc) = keycode {
-                self.grab_key(*kc, mod_key)?;
-                log::info!("Grabbed Mod4+{} (keycode {})", i + 1, kc);
+        // Grab all configured keybindings
+        for (action, binding) in &self.keybindings {
+            if let Some(&keycode) = keysym_to_keycode.get(&binding.keysym) {
+                let modmask = ModMask::from(binding.modifiers);
+                self.grab_key(keycode, modmask)?;
+                log::info!(
+                    "Grabbed {:?} (keycode {}, mods 0x{:x})",
+                    action,
+                    keycode,
+                    binding.modifiers
+                );
+            } else {
+                log::warn!(
+                    "Could not find keycode for {:?} (keysym 0x{:x})",
+                    action,
+                    binding.keysym
+                );
             }
         }
 
@@ -1052,10 +976,11 @@ impl Wm {
 
     /// Spawn a terminal
     fn spawn_terminal(&self) {
-        log::info!("Spawning terminal");
+        let terminal = &self.user_config.general.terminal;
+        log::info!("Spawning terminal: {}", terminal);
 
-        if let Err(e) = Command::new("alacritty").spawn() {
-            log::error!("Failed to spawn alacritty: {}", e);
+        if let Err(e) = Command::new(terminal).spawn() {
+            log::error!("Failed to spawn {}: {}", terminal, e);
             // Fallback to xterm
             if let Err(e) = Command::new("xterm").spawn() {
                 log::error!("Failed to spawn xterm: {}", e);
@@ -1253,10 +1178,6 @@ impl Wm {
 
     /// Handle a key press event
     fn handle_key_press(&mut self, event: KeyPressEvent) -> Result<()> {
-        let mod_key = u16::from(ModMask::M4);
-        let shift = u16::from(ModMask::SHIFT);
-        let ctrl = u16::from(ModMask::CONTROL);
-
         // Convert state to u16 and mask out NumLock and CapsLock for comparison
         let state_u16 = u16::from(event.state);
         let clean_state = state_u16 & !(u16::from(ModMask::M2) | u16::from(ModMask::LOCK));
@@ -1266,7 +1187,9 @@ impl Wm {
         let min_keycode = setup.min_keycode;
         let max_keycode = setup.max_keycode;
 
-        let mapping = self.conn.get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
+        let mapping = self
+            .conn
+            .get_keyboard_mapping(min_keycode, max_keycode - min_keycode + 1)?
             .reply()?;
 
         let keysyms_per_keycode = mapping.keysyms_per_keycode as usize;
@@ -1275,120 +1198,51 @@ impl Wm {
 
         log::debug!(
             "KeyPress: keycode={}, keysym=0x{:x}, state=0x{:x}, clean_state=0x{:x}",
-            event.detail, keysym, state_u16, clean_state
+            event.detail,
+            keysym,
+            state_u16,
+            clean_state
         );
 
-        // Keysym constants
-        const XK_RETURN: u32 = 0xff0d;
-        const XK_TAB: u32 = 0xff09;
-        const XK_Q: u32 = 0x71;
-        const XK_J: u32 = 0x6a;
-        const XK_K: u32 = 0x6b;
-        const XK_H: u32 = 0x68;
-        const XK_L: u32 = 0x6c;
-        const XK_S: u32 = 0x73;
-        const XK_V: u32 = 0x76;
-        const XK_1: u32 = 0x31;
-        const XK_2: u32 = 0x32;
-        const XK_3: u32 = 0x33;
-        const XK_4: u32 = 0x34;
-        const XK_5: u32 = 0x35;
-        const XK_6: u32 = 0x36;
-        const XK_7: u32 = 0x37;
-        const XK_8: u32 = 0x38;
-        const XK_9: u32 = 0x39;
-
-        match (keysym, clean_state) {
-            // Mod4+Return -> spawn terminal
-            (XK_RETURN, s) if s == mod_key => {
-                self.spawn_terminal();
+        // Find matching action from configured keybindings
+        let mut matched_action = None;
+        for (action, binding) in &self.keybindings {
+            if binding.keysym == keysym && binding.modifiers == clean_state {
+                matched_action = Some(*action);
+                break;
             }
+        }
 
-            // Mod4+Tab -> cycle tabs forward in focused frame
-            (XK_TAB, s) if s == mod_key => {
-                self.cycle_tab(true)?;
-            }
+        if let Some(action) = matched_action {
+            self.execute_action(action)?;
+        }
 
-            // Mod4+Shift+Tab -> cycle tabs backward in focused frame
-            (XK_TAB, s) if s == mod_key | shift => {
-                self.cycle_tab(false)?;
-            }
+        Ok(())
+    }
 
-            // Mod4+J -> next window (across all frames)
-            (XK_J, s) if s == mod_key => {
-                self.cycle_focus(true)?;
-            }
-
-            // Mod4+K -> previous window (across all frames)
-            (XK_K, s) if s == mod_key => {
-                self.cycle_focus(false)?;
-            }
-
-            // Mod4+1-9 -> focus specific tab
-            (XK_1, s) if s == mod_key => { self.focus_tab(1)?; }
-            (XK_2, s) if s == mod_key => { self.focus_tab(2)?; }
-            (XK_3, s) if s == mod_key => { self.focus_tab(3)?; }
-            (XK_4, s) if s == mod_key => { self.focus_tab(4)?; }
-            (XK_5, s) if s == mod_key => { self.focus_tab(5)?; }
-            (XK_6, s) if s == mod_key => { self.focus_tab(6)?; }
-            (XK_7, s) if s == mod_key => { self.focus_tab(7)?; }
-            (XK_8, s) if s == mod_key => { self.focus_tab(8)?; }
-            (XK_9, s) if s == mod_key => { self.focus_tab(9)?; }
-
-            // Mod4+H -> focus left frame
-            (XK_H, s) if s == mod_key => {
-                self.focus_frame(false)?;
-            }
-
-            // Mod4+L -> focus right frame
-            (XK_L, s) if s == mod_key => {
-                self.focus_frame(true)?;
-            }
-
-            // Mod4+Shift+H -> move window to left frame
-            (XK_H, s) if s == mod_key | shift => {
-                self.move_window(false)?;
-            }
-
-            // Mod4+Shift+L -> move window to right frame
-            (XK_L, s) if s == mod_key | shift => {
-                self.move_window(true)?;
-            }
-
-            // Mod4+Ctrl+H -> shrink focused frame (grow left sibling)
-            (XK_H, s) if s == mod_key | ctrl => {
-                self.resize_split(false)?;
-            }
-
-            // Mod4+Ctrl+L -> grow focused frame (shrink left sibling)
-            (XK_L, s) if s == mod_key | ctrl => {
-                self.resize_split(true)?;
-            }
-
-            // Mod4+S -> split horizontal
-            (XK_S, s) if s == mod_key => {
-                self.split_focused(SplitDirection::Horizontal)?;
-            }
-
-            // Mod4+V -> split vertical
-            (XK_V, s) if s == mod_key => {
-                self.split_focused(SplitDirection::Vertical)?;
-            }
-
-            // Mod4+Q -> close focused window
-            (XK_Q, s) if s == mod_key => {
-                self.close_focused_window()?;
-            }
-
-            // Mod4+Shift+Q -> quit WM
-            (XK_Q, s) if s == mod_key | shift => {
+    /// Execute a window manager action
+    fn execute_action(&mut self, action: WmAction) -> Result<()> {
+        match action {
+            WmAction::SpawnTerminal => self.spawn_terminal(),
+            WmAction::CycleTabForward => self.cycle_tab(true)?,
+            WmAction::CycleTabBackward => self.cycle_tab(false)?,
+            WmAction::FocusNext => self.cycle_focus(true)?,
+            WmAction::FocusPrev => self.cycle_focus(false)?,
+            WmAction::FocusFrameLeft => self.focus_frame(false)?,
+            WmAction::FocusFrameRight => self.focus_frame(true)?,
+            WmAction::MoveWindowLeft => self.move_window(false)?,
+            WmAction::MoveWindowRight => self.move_window(true)?,
+            WmAction::ResizeShrink => self.resize_split(false)?,
+            WmAction::ResizeGrow => self.resize_split(true)?,
+            WmAction::SplitHorizontal => self.split_focused(SplitDirection::Horizontal)?,
+            WmAction::SplitVertical => self.split_focused(SplitDirection::Vertical)?,
+            WmAction::CloseWindow => self.close_focused_window()?,
+            WmAction::Quit => {
                 log::info!("Quitting window manager");
                 self.running = false;
             }
-
-            _ => {}
+            WmAction::FocusTab(n) => self.focus_tab(n)?,
         }
-
         Ok(())
     }
 
