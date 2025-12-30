@@ -541,8 +541,8 @@ impl Wm {
                 let border = self.config.border_width;
                 let tab_bar_height = self.config.tab_bar_height;
 
-                // Calculate client area (below tab bar if multiple windows)
-                let has_tabs = frame.windows.len() > 1;
+                // Calculate client area (below tab bar)
+                let has_tabs = frame.windows.len() >= 1;
                 let client_y = if has_tabs {
                     rect.y + tab_bar_height as i32
                 } else {
