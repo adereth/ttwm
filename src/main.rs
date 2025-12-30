@@ -1,10 +1,15 @@
 //! ttwm - Tabbed Tiling Window Manager
 //!
 //! A minimal X11 tiling window manager inspired by Notion.
-//! Milestone 3: Basic tiling with horizontal/vertical splits.
+//! Milestone 5: Tabs with tab bar rendering.
+//! Milestone 6: IPC interface for debugability and scriptability.
 
+mod ipc;
 mod layout;
+mod state;
+mod tracing;
 
+use std::collections::HashMap;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -14,7 +19,9 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use layout::{LayoutTree, Rect, SplitDirection};
+use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
+use layout::{LayoutTree, NodeId, Rect, SplitDirection};
+use tracing::EventTracer;
 
 /// EWMH atoms we need
 struct Atoms {
@@ -55,6 +62,20 @@ struct LayoutConfig {
     outer_gap: u32,
     /// Border width
     border_width: u32,
+    /// Tab bar height
+    tab_bar_height: u32,
+    /// Tab bar background color
+    tab_bar_bg: u32,
+    /// Tab bar focused tab color
+    tab_focused_bg: u32,
+    /// Tab bar unfocused tab color
+    tab_unfocused_bg: u32,
+    /// Tab bar text color
+    tab_text_color: u32,
+    /// Border color for focused window
+    border_focused: u32,
+    /// Border color for unfocused window
+    border_unfocused: u32,
 }
 
 impl Default for LayoutConfig {
@@ -63,6 +84,13 @@ impl Default for LayoutConfig {
             gap: 8,
             outer_gap: 8,
             border_width: 2,
+            tab_bar_height: 20,
+            tab_bar_bg: 0x2e2e2e,      // Dark gray
+            tab_focused_bg: 0x5294e2,   // Blue (matching border)
+            tab_unfocused_bg: 0x3a3a3a, // Darker gray
+            tab_text_color: 0xffffff,   // White
+            border_focused: 0x5294e2,   // Blue
+            border_unfocused: 0x3a3a3a, // Gray
         }
     }
 }
@@ -81,8 +109,18 @@ struct Wm {
     check_window: Window,
     /// Layout configuration
     config: LayoutConfig,
+    /// Tab bar windows for each frame (NodeId -> Window)
+    tab_bar_windows: HashMap<NodeId, Window>,
+    /// Windows we've intentionally unmapped (hidden tabs) - don't unmanage on UnmapNotify
+    hidden_windows: std::collections::HashSet<Window>,
+    /// Graphics context for drawing
+    gc: Gcontext,
     /// Whether we should keep running
     running: bool,
+    /// IPC server for external control
+    ipc: Option<IpcServer>,
+    /// Event tracer for debugging
+    tracer: EventTracer,
 }
 
 impl Wm {
@@ -118,6 +156,25 @@ impl Wm {
             &CreateWindowAux::new(),
         )?;
 
+        // Create graphics context for drawing tab bars
+        let gc = conn.generate_id()?;
+        conn.create_gc(
+            gc,
+            root,
+            &CreateGCAux::new()
+                .foreground(screen.white_pixel)
+                .background(screen.black_pixel),
+        )?;
+
+        // Initialize IPC server (non-fatal if it fails)
+        let ipc = match IpcServer::bind() {
+            Ok(server) => Some(server),
+            Err(e) => {
+                log::warn!("Failed to start IPC server: {}. IPC will be disabled.", e);
+                None
+            }
+        };
+
         Ok(Self {
             conn,
             screen_num,
@@ -127,7 +184,12 @@ impl Wm {
             focused_window: None,
             check_window,
             config: LayoutConfig::default(),
+            tab_bar_windows: HashMap::new(),
+            hidden_windows: std::collections::HashSet::new(),
+            gc,
             running: true,
+            ipc,
+            tracer: EventTracer::new(),
         })
     }
 
@@ -259,29 +321,250 @@ impl Wm {
         )
     }
 
-    /// Apply the current layout to all windows
-    fn apply_layout(&self) -> Result<()> {
-        let screen_rect = self.usable_screen();
-        let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+    /// Get or create a tab bar window for a frame
+    fn get_or_create_tab_bar(&mut self, frame_id: NodeId, rect: &Rect) -> Result<Window> {
+        if let Some(&window) = self.tab_bar_windows.get(&frame_id) {
+            // Update position and size
+            self.conn.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .x(rect.x)
+                    .y(rect.y)
+                    .width(rect.width)
+                    .height(self.config.tab_bar_height),
+            )?;
+            return Ok(window);
+        }
 
-        for (frame_id, rect) in geometries {
-            if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
-                // Apply geometry to all windows in this frame
-                // For now, all windows in a frame get the same geometry (stacked)
-                for &window in &frame.windows {
-                    let border = self.config.border_width;
-                    self.conn.configure_window(
-                        window,
-                        &ConfigureWindowAux::new()
-                            .x(rect.x)
-                            .y(rect.y)
-                            .width(rect.width.saturating_sub(border * 2))
-                            .height(rect.height.saturating_sub(border * 2))
-                            .border_width(border),
-                    )?;
+        // Create new tab bar window
+        let window = self.conn.generate_id()?;
+        self.conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            self.root,
+            rect.x as i16,
+            rect.y as i16,
+            rect.width as u16,
+            self.config.tab_bar_height as u16,
+            0, // border width
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new()
+                .background_pixel(self.config.tab_bar_bg)
+                .event_mask(EventMask::EXPOSURE | EventMask::BUTTON_PRESS),
+        )?;
+
+        self.conn.map_window(window)?;
+        self.tab_bar_windows.insert(frame_id, window);
+
+        Ok(window)
+    }
+
+    /// Draw the tab bar for a frame
+    fn draw_tab_bar(&self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
+        let frame = match self.layout.get(frame_id).and_then(|n| n.as_frame()) {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+
+        let num_tabs = frame.windows.len();
+        if num_tabs == 0 {
+            return Ok(());
+        }
+
+        let tab_width = rect.width / num_tabs as u32;
+        let height = self.config.tab_bar_height;
+
+        // Clear the background
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: rect.width as u16,
+                height: height as u16,
+            }],
+        )?;
+
+        // Draw each tab
+        for (i, &client_window) in frame.windows.iter().enumerate() {
+            let x = (i as u32 * tab_width) as i16;
+            let is_focused = i == frame.focused;
+
+            // Tab background
+            let bg_color = if is_focused {
+                self.config.tab_focused_bg
+            } else {
+                self.config.tab_unfocused_bg
+            };
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: x + 1,
+                    y: 1,
+                    width: (tab_width - 2) as u16,
+                    height: (height - 2) as u16,
+                }],
+            )?;
+
+            // Get window title
+            let title = self.get_window_title(client_window);
+            let display_title: String = title.chars().take(20).collect();
+
+            // Draw text
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_text_color))?;
+            self.conn.image_text8(
+                window,
+                self.gc,
+                x + 4,
+                (height - 5) as i16,
+                display_title.as_bytes(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Get window title (WM_NAME or _NET_WM_NAME)
+    fn get_window_title(&self, window: Window) -> String {
+        // Try _NET_WM_NAME first
+        if let Ok(reply) = self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_name,
+            self.atoms.utf8_string,
+            0,
+            1024,
+        ) {
+            if let Ok(reply) = reply.reply() {
+                if !reply.value.is_empty() {
+                    if let Ok(s) = String::from_utf8(reply.value) {
+                        return s;
+                    }
                 }
             }
         }
+
+        // Fall back to WM_NAME
+        if let Ok(reply) = self.conn.get_property(
+            false,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            0,
+            1024,
+        ) {
+            if let Ok(reply) = reply.reply() {
+                if !reply.value.is_empty() {
+                    if let Ok(s) = String::from_utf8(reply.value) {
+                        return s;
+                    }
+                }
+            }
+        }
+
+        // Default title
+        format!("0x{:x}", window)
+    }
+
+    /// Remove tab bar windows for frames that no longer exist
+    fn cleanup_tab_bars(&mut self) {
+        let valid_frames: std::collections::HashSet<_> = self.layout.all_frames().into_iter().collect();
+        let to_remove: Vec<_> = self.tab_bar_windows
+            .keys()
+            .filter(|id| !valid_frames.contains(id))
+            .copied()
+            .collect();
+
+        for frame_id in to_remove {
+            if let Some(window) = self.tab_bar_windows.remove(&frame_id) {
+                let _ = self.conn.destroy_window(window);
+            }
+        }
+    }
+
+    /// Apply the current layout to all windows
+    fn apply_layout(&mut self) -> Result<()> {
+        let screen_rect = self.usable_screen();
+        let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+
+        // Collect frame info for tab bar management
+        let mut frames_with_tabs: Vec<(NodeId, Rect, usize)> = Vec::new();
+
+        for (frame_id, rect) in &geometries {
+            if let Some(frame) = self.layout.get(*frame_id).and_then(|n| n.as_frame()) {
+                let border = self.config.border_width;
+                let tab_bar_height = self.config.tab_bar_height;
+
+                // Calculate client area (below tab bar if multiple windows)
+                let has_tabs = frame.windows.len() > 1;
+                let client_y = if has_tabs {
+                    rect.y + tab_bar_height as i32
+                } else {
+                    rect.y
+                };
+                let client_height = if has_tabs {
+                    rect.height.saturating_sub(tab_bar_height)
+                } else {
+                    rect.height
+                };
+
+                if has_tabs {
+                    log::debug!("Frame {:?} has {} windows, will show tab bar", frame_id, frame.windows.len());
+                    frames_with_tabs.push((*frame_id, rect.clone(), frame.windows.len()));
+                } else {
+                    // Hide tab bar for single-window frames
+                    if let Some(&tab_window) = self.tab_bar_windows.get(frame_id) {
+                        self.conn.unmap_window(tab_window)?;
+                    }
+                }
+
+                // Only show the focused window, unmap others
+                for (i, &window) in frame.windows.iter().enumerate() {
+                    if i == frame.focused {
+                        // Configure and map the focused window
+                        self.conn.configure_window(
+                            window,
+                            &ConfigureWindowAux::new()
+                                .x(rect.x)
+                                .y(client_y)
+                                .width(rect.width.saturating_sub(border * 2))
+                                .height(client_height.saturating_sub(border * 2))
+                                .border_width(border),
+                        )?;
+                        self.conn.map_window(window)?;
+                        // Remove from hidden set since it's now visible
+                        self.hidden_windows.remove(&window);
+                    } else {
+                        // Unmap non-focused windows (tabs)
+                        // Track that we intentionally hid this window
+                        self.hidden_windows.insert(window);
+                        self.conn.unmap_window(window)?;
+                    }
+                }
+            }
+        }
+
+        // Create/update tab bars for frames with multiple windows
+        for (frame_id, rect, _) in frames_with_tabs {
+            let tab_window = self.get_or_create_tab_bar(frame_id, &rect)?;
+            log::info!("Tab bar window 0x{:x} for frame {:?} at ({}, {}) {}x{}",
+                tab_window, frame_id, rect.x, rect.y, rect.width, self.config.tab_bar_height);
+            self.conn.map_window(tab_window)?;
+            // Raise the tab bar above client windows
+            self.conn.configure_window(
+                tab_window,
+                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )?;
+            self.draw_tab_bar(frame_id, tab_window, &rect)?;
+        }
+
+        // Clean up tab bars for removed frames
+        self.cleanup_tab_bars();
 
         self.conn.flush()?;
         Ok(())
@@ -313,6 +596,15 @@ impl Wm {
         const XK_L: u32 = 0x6c;
         const XK_S: u32 = 0x73;
         const XK_V: u32 = 0x76;
+        const XK_1: u32 = 0x31;
+        const XK_2: u32 = 0x32;
+        const XK_3: u32 = 0x33;
+        const XK_4: u32 = 0x34;
+        const XK_5: u32 = 0x35;
+        const XK_6: u32 = 0x36;
+        const XK_7: u32 = 0x37;
+        const XK_8: u32 = 0x38;
+        const XK_9: u32 = 0x39;
 
         let mut return_keycode: Option<Keycode> = None;
         let mut tab_keycode: Option<Keycode> = None;
@@ -323,6 +615,7 @@ impl Wm {
         let mut l_keycode: Option<Keycode> = None;
         let mut s_keycode: Option<Keycode> = None;
         let mut v_keycode: Option<Keycode> = None;
+        let mut num_keycodes: [Option<Keycode>; 9] = [None; 9];
 
         for (i, chunk) in mapping.keysyms.chunks(keysyms_per_keycode).enumerate() {
             for keysym in chunk {
@@ -336,6 +629,15 @@ impl Wm {
                     XK_L => l_keycode = Some(min_keycode + i as u8),
                     XK_S => s_keycode = Some(min_keycode + i as u8),
                     XK_V => v_keycode = Some(min_keycode + i as u8),
+                    XK_1 => num_keycodes[0] = Some(min_keycode + i as u8),
+                    XK_2 => num_keycodes[1] = Some(min_keycode + i as u8),
+                    XK_3 => num_keycodes[2] = Some(min_keycode + i as u8),
+                    XK_4 => num_keycodes[3] = Some(min_keycode + i as u8),
+                    XK_5 => num_keycodes[4] = Some(min_keycode + i as u8),
+                    XK_6 => num_keycodes[5] = Some(min_keycode + i as u8),
+                    XK_7 => num_keycodes[6] = Some(min_keycode + i as u8),
+                    XK_8 => num_keycodes[7] = Some(min_keycode + i as u8),
+                    XK_9 => num_keycodes[8] = Some(min_keycode + i as u8),
                     _ => {}
                 }
             }
@@ -380,10 +682,22 @@ impl Wm {
         if let Some(keycode) = h_keycode {
             self.grab_key(keycode, mod_key)?;
             log::info!("Grabbed Mod4+H (keycode {})", keycode);
+            // Mod4+Shift+H for move window left
+            self.grab_key(keycode, mod_key | ModMask::SHIFT)?;
+            log::info!("Grabbed Mod4+Shift+H (keycode {})", keycode);
+            // Mod4+Ctrl+H for resize left
+            self.grab_key(keycode, mod_key | ModMask::CONTROL)?;
+            log::info!("Grabbed Mod4+Ctrl+H (keycode {})", keycode);
         }
         if let Some(keycode) = l_keycode {
             self.grab_key(keycode, mod_key)?;
             log::info!("Grabbed Mod4+L (keycode {})", keycode);
+            // Mod4+Shift+L for move window right
+            self.grab_key(keycode, mod_key | ModMask::SHIFT)?;
+            log::info!("Grabbed Mod4+Shift+L (keycode {})", keycode);
+            // Mod4+Ctrl+L for resize right
+            self.grab_key(keycode, mod_key | ModMask::CONTROL)?;
+            log::info!("Grabbed Mod4+Ctrl+L (keycode {})", keycode);
         }
 
         // Grab Mod4+S for horizontal split, Mod4+V for vertical split
@@ -394,6 +708,14 @@ impl Wm {
         if let Some(keycode) = v_keycode {
             self.grab_key(keycode, mod_key)?;
             log::info!("Grabbed Mod4+V (keycode {})", keycode);
+        }
+
+        // Grab Mod4+1-9 for tab selection
+        for (i, keycode) in num_keycodes.iter().enumerate() {
+            if let Some(kc) = keycode {
+                self.grab_key(*kc, mod_key)?;
+                log::info!("Grabbed Mod4+{} (keycode {})", i + 1, kc);
+            }
         }
 
         self.conn.flush()?;
@@ -458,7 +780,7 @@ impl Wm {
         self.conn.change_window_attributes(
             window,
             &ChangeWindowAttributesAux::new()
-                .border_pixel(0x5294e2), // Blue border
+                .border_pixel(self.config.border_focused),
         )?;
 
         // Subscribe to events on this window
@@ -489,8 +811,16 @@ impl Wm {
 
     /// Unmanage a window
     fn unmanage_window(&mut self, window: Window) {
+        // Remove from hidden set if present
+        self.hidden_windows.remove(&window);
+
         if let Some(_frame_id) = self.layout.remove_window(window) {
             log::info!("Unmanaging window 0x{:x}", window);
+
+            // Clean up empty frames
+            if self.layout.remove_empty_frames() {
+                log::info!("Cleaned up empty frames");
+            }
 
             // Update EWMH client list
             let _ = self.update_client_list();
@@ -522,7 +852,7 @@ impl Wm {
         }
     }
 
-    /// Cycle focus to the next/previous window
+    /// Cycle focus to the next/previous window (across all frames)
     fn cycle_focus(&mut self, forward: bool) -> Result<()> {
         let windows = self.layout.all_windows();
         if windows.is_empty() {
@@ -546,6 +876,26 @@ impl Wm {
         let window = windows[next_idx];
         self.focus_window(window)?;
 
+        Ok(())
+    }
+
+    /// Cycle tabs within the focused frame
+    fn cycle_tab(&mut self, forward: bool) -> Result<()> {
+        if let Some(window) = self.layout.cycle_tab(forward) {
+            self.apply_layout()?;
+            self.focus_window(window)?;
+            log::info!("Cycled to {} tab", if forward { "next" } else { "previous" });
+        }
+        Ok(())
+    }
+
+    /// Focus a specific tab by number (1-based for user, 0-based internally)
+    fn focus_tab(&mut self, num: usize) -> Result<()> {
+        if let Some(window) = self.layout.focus_tab(num.saturating_sub(1)) {
+            self.apply_layout()?;
+            self.focus_window(window)?;
+            log::info!("Focused tab {}", num);
+        }
         Ok(())
     }
 
@@ -578,7 +928,7 @@ impl Wm {
                 self.conn.change_window_attributes(
                     old,
                     &ChangeWindowAttributesAux::new()
-                        .border_pixel(0x3a3a3a), // Gray border for unfocused
+                        .border_pixel(self.config.border_unfocused),
                 )?;
             }
         }
@@ -596,7 +946,7 @@ impl Wm {
         self.conn.change_window_attributes(
             window,
             &ChangeWindowAttributesAux::new()
-                .border_pixel(0x5294e2), // Blue border for focused
+                .border_pixel(self.config.border_focused),
         )?;
 
         self.focused_window = Some(window);
@@ -604,6 +954,14 @@ impl Wm {
         // Also update the layout's focused frame to match
         if let Some(frame_id) = self.layout.find_window(window) {
             self.layout.focused = frame_id;
+
+            // Re-raise the tab bar if this frame has one (so it stays above the window)
+            if let Some(&tab_window) = self.tab_bar_windows.get(&frame_id) {
+                self.conn.configure_window(
+                    tab_window,
+                    &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+                )?;
+            }
         }
 
         // Update EWMH active window
@@ -652,7 +1010,8 @@ impl Wm {
                 log::debug!("UnmapNotify for window 0x{:x}", e.window);
                 // Only unmanage if the event is about a window we manage
                 // and not from a reparent operation
-                if e.event == self.root {
+                // Also skip if we intentionally hid this window (it's a hidden tab)
+                if e.event == self.root && !self.hidden_windows.contains(&e.window) {
                     self.unmanage_window(e.window);
                 }
             }
@@ -689,6 +1048,16 @@ impl Wm {
                 self.handle_key_press(e)?;
             }
 
+            Event::Expose(e) => {
+                // Redraw tab bar if it's one of ours
+                self.handle_expose(e)?;
+            }
+
+            Event::ButtonPress(e) => {
+                // Handle clicks on tab bars
+                self.handle_button_press(e)?;
+            }
+
             _ => {
                 // Ignore other events for now
             }
@@ -697,10 +1066,106 @@ impl Wm {
         Ok(())
     }
 
+    /// Handle expose event (redraw tab bar)
+    fn handle_expose(&self, event: ExposeEvent) -> Result<()> {
+        // Find which frame this tab bar belongs to
+        for (&frame_id, &tab_window) in &self.tab_bar_windows {
+            if tab_window == event.window {
+                // Get frame geometry to redraw
+                let screen_rect = self.usable_screen();
+                let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+                for (fid, rect) in geometries {
+                    if fid == frame_id {
+                        self.draw_tab_bar(frame_id, tab_window, &rect)?;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle button press event (click on tab bar)
+    fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
+        // Only handle left click
+        if event.detail != 1 {
+            return Ok(());
+        }
+
+        // Find which frame's tab bar was clicked
+        let mut clicked_frame = None;
+        for (&frame_id, &tab_window) in &self.tab_bar_windows {
+            if tab_window == event.event {
+                clicked_frame = Some(frame_id);
+                break;
+            }
+        }
+
+        let frame_id = match clicked_frame {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        // Get frame geometry
+        let screen_rect = self.usable_screen();
+        let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+
+        for (fid, rect) in geometries {
+            if fid == frame_id {
+                if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
+                    let num_tabs = frame.windows.len();
+                    if num_tabs == 0 {
+                        break;
+                    }
+
+                    // Calculate which tab was clicked
+                    let tab_width = rect.width / num_tabs as u32;
+                    let clicked_tab = (event.event_x as u32 / tab_width) as usize;
+
+                    if clicked_tab < num_tabs {
+                        // Focus this tab
+                        if let Some(window) = self.layout.focus_tab(clicked_tab) {
+                            self.apply_layout()?;
+                            self.focus_window(window)?;
+                            log::info!("Clicked tab {}", clicked_tab + 1);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resize the current split
+    fn resize_split(&mut self, grow: bool) -> Result<()> {
+        let delta = if grow { 0.05 } else { -0.05 };
+        if self.layout.resize_focused_split(delta) {
+            self.apply_layout()?;
+            log::info!("Resized split by {}", delta);
+        }
+        Ok(())
+    }
+
+    /// Move the focused window to an adjacent frame
+    fn move_window(&mut self, forward: bool) -> Result<()> {
+        if let Some(window) = self.layout.move_window_to_adjacent(forward) {
+            // Clean up empty frames
+            self.layout.remove_empty_frames();
+            self.apply_layout()?;
+            self.focus_window(window)?;
+            log::info!("Moved window 0x{:x} to {} frame", window, if forward { "next" } else { "previous" });
+        }
+        Ok(())
+    }
+
     /// Handle a key press event
     fn handle_key_press(&mut self, event: KeyPressEvent) -> Result<()> {
         let mod_key = u16::from(ModMask::M4);
         let shift = u16::from(ModMask::SHIFT);
+        let ctrl = u16::from(ModMask::CONTROL);
 
         // Convert state to u16 and mask out NumLock and CapsLock for comparison
         let state_u16 = u16::from(event.state);
@@ -733,6 +1198,15 @@ impl Wm {
         const XK_L: u32 = 0x6c;
         const XK_S: u32 = 0x73;
         const XK_V: u32 = 0x76;
+        const XK_1: u32 = 0x31;
+        const XK_2: u32 = 0x32;
+        const XK_3: u32 = 0x33;
+        const XK_4: u32 = 0x34;
+        const XK_5: u32 = 0x35;
+        const XK_6: u32 = 0x36;
+        const XK_7: u32 = 0x37;
+        const XK_8: u32 = 0x38;
+        const XK_9: u32 = 0x39;
 
         match (keysym, clean_state) {
             // Mod4+Return -> spawn terminal
@@ -740,25 +1214,36 @@ impl Wm {
                 self.spawn_terminal();
             }
 
-            // Mod4+Tab -> cycle windows forward
+            // Mod4+Tab -> cycle tabs forward in focused frame
             (XK_TAB, s) if s == mod_key => {
-                self.cycle_focus(true)?;
+                self.cycle_tab(true)?;
             }
 
-            // Mod4+Shift+Tab -> cycle windows backward
+            // Mod4+Shift+Tab -> cycle tabs backward in focused frame
             (XK_TAB, s) if s == mod_key | shift => {
-                self.cycle_focus(false)?;
+                self.cycle_tab(false)?;
             }
 
-            // Mod4+J -> next window
+            // Mod4+J -> next window (across all frames)
             (XK_J, s) if s == mod_key => {
                 self.cycle_focus(true)?;
             }
 
-            // Mod4+K -> previous window
+            // Mod4+K -> previous window (across all frames)
             (XK_K, s) if s == mod_key => {
                 self.cycle_focus(false)?;
             }
+
+            // Mod4+1-9 -> focus specific tab
+            (XK_1, s) if s == mod_key => { self.focus_tab(1)?; }
+            (XK_2, s) if s == mod_key => { self.focus_tab(2)?; }
+            (XK_3, s) if s == mod_key => { self.focus_tab(3)?; }
+            (XK_4, s) if s == mod_key => { self.focus_tab(4)?; }
+            (XK_5, s) if s == mod_key => { self.focus_tab(5)?; }
+            (XK_6, s) if s == mod_key => { self.focus_tab(6)?; }
+            (XK_7, s) if s == mod_key => { self.focus_tab(7)?; }
+            (XK_8, s) if s == mod_key => { self.focus_tab(8)?; }
+            (XK_9, s) if s == mod_key => { self.focus_tab(9)?; }
 
             // Mod4+H -> focus left frame
             (XK_H, s) if s == mod_key => {
@@ -768,6 +1253,26 @@ impl Wm {
             // Mod4+L -> focus right frame
             (XK_L, s) if s == mod_key => {
                 self.focus_frame(true)?;
+            }
+
+            // Mod4+Shift+H -> move window to left frame
+            (XK_H, s) if s == mod_key | shift => {
+                self.move_window(false)?;
+            }
+
+            // Mod4+Shift+L -> move window to right frame
+            (XK_L, s) if s == mod_key | shift => {
+                self.move_window(true)?;
+            }
+
+            // Mod4+Ctrl+H -> shrink focused frame (grow left sibling)
+            (XK_H, s) if s == mod_key | ctrl => {
+                self.resize_split(false)?;
+            }
+
+            // Mod4+Ctrl+L -> grow focused frame (shrink left sibling)
+            (XK_L, s) if s == mod_key | ctrl => {
+                self.resize_split(true)?;
             }
 
             // Mod4+S -> split horizontal
@@ -802,16 +1307,318 @@ impl Wm {
         log::info!("Entering event loop");
 
         while self.running {
-            // Wait for and process events
-            let event = self.conn.wait_for_event()
-                .context("Error waiting for X11 event")?;
+            // Poll IPC commands (non-blocking)
+            // We need to take the ipc out temporarily to avoid borrow conflicts
+            if let Some(ipc) = self.ipc.take() {
+                // Collect all pending commands
+                let mut pending_commands = Vec::new();
+                while let Some((cmd, client)) = ipc.poll() {
+                    pending_commands.push((cmd, client));
+                }
 
-            if let Err(e) = self.handle_event(event) {
-                log::error!("Error handling event: {}", e);
+                // Put ipc back
+                self.ipc = Some(ipc);
+
+                // Now handle each command
+                for (cmd, mut client) in pending_commands {
+                    let response = self.handle_ipc(cmd);
+                    if let Err(e) = client.respond(response) {
+                        log::warn!("Failed to send IPC response: {}", e);
+                    }
+                }
+            }
+
+            // Poll for X11 events (non-blocking)
+            match self.conn.poll_for_event() {
+                Ok(Some(event)) => {
+                    if let Err(e) = self.handle_event(event) {
+                        log::error!("Error handling event: {}", e);
+                    }
+                }
+                Ok(None) => {
+                    // No event, sleep briefly to avoid busy-waiting
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => {
+                    log::error!("Error polling for X11 event: {}", e);
+                }
             }
         }
 
         log::info!("Exiting window manager");
+        Ok(())
+    }
+
+    /// Handle an IPC command and return a response
+    fn handle_ipc(&mut self, cmd: IpcCommand) -> IpcResponse {
+        log::debug!("Handling IPC command: {:?}", cmd);
+
+        match cmd {
+            IpcCommand::GetState => {
+                IpcResponse::State {
+                    data: self.snapshot_state(),
+                }
+            }
+            IpcCommand::GetLayout => {
+                let geometries = self.layout.calculate_geometries(
+                    self.usable_screen(),
+                    self.config.gap,
+                );
+                IpcResponse::Layout {
+                    data: self.layout.snapshot(Some(&geometries)),
+                }
+            }
+            IpcCommand::GetWindows => {
+                IpcResponse::Windows {
+                    data: self.get_window_info_list(),
+                }
+            }
+            IpcCommand::GetFocused => {
+                IpcResponse::Focused {
+                    window: self.focused_window,
+                }
+            }
+            IpcCommand::ValidateState => {
+                let violations = self.validate_state();
+                IpcResponse::Validation {
+                    valid: violations.is_empty(),
+                    violations,
+                }
+            }
+            IpcCommand::GetEventLog { count } => {
+                let entries = match count {
+                    Some(n) => self.tracer.get_last(n),
+                    None => self.tracer.get_all(),
+                };
+                IpcResponse::EventLog { entries }
+            }
+            IpcCommand::FocusWindow { window } => {
+                match self.focus_window(window) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "focus_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::FocusTab { index } => {
+                match self.focus_tab(index) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "focus_tab_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::FocusFrame { forward } => {
+                match self.focus_frame(forward) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "focus_frame_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::Split { direction } => {
+                let dir = match direction.to_lowercase().as_str() {
+                    "horizontal" | "h" => SplitDirection::Horizontal,
+                    "vertical" | "v" => SplitDirection::Vertical,
+                    _ => {
+                        return IpcResponse::Error {
+                            code: "invalid_direction".to_string(),
+                            message: format!("Invalid split direction: {}", direction),
+                        }
+                    }
+                };
+                match self.split_focused(dir) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "split_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::MoveWindow { forward } => {
+                match self.move_window(forward) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "move_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::ResizeSplit { delta } => {
+                match self.resize_split(delta > 0.0) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "resize_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::CloseWindow => {
+                match self.close_focused_window() {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "close_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::CycleTab { forward } => {
+                match self.cycle_tab(forward) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "cycle_tab_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::Screenshot { path } => {
+                match self.capture_screenshot(&path) {
+                    Ok(()) => IpcResponse::Screenshot { path },
+                    Err(e) => IpcResponse::Error {
+                        code: "screenshot_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::Quit => {
+                log::info!("Quit requested via IPC");
+                self.running = false;
+                IpcResponse::Ok
+            }
+        }
+    }
+
+    /// Create a snapshot of the current WM state for IPC
+    fn snapshot_state(&self) -> WmStateSnapshot {
+        let geometries = self.layout.calculate_geometries(
+            self.usable_screen(),
+            self.config.gap,
+        );
+        WmStateSnapshot {
+            focused_window: self.focused_window,
+            focused_frame: self.layout.focused_frame_id(),
+            window_count: self.layout.all_windows().len(),
+            frame_count: self.layout.all_frames().len(),
+            layout: self.layout.snapshot(Some(&geometries)),
+            windows: self.get_window_info_list(),
+        }
+    }
+
+    /// Get information about all managed windows
+    fn get_window_info_list(&self) -> Vec<WindowInfo> {
+        let mut windows = Vec::new();
+        let all_frames = self.layout.all_frames();
+
+        for frame_id in all_frames {
+            if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
+                let is_focused_frame = frame_id == self.layout.focused;
+                for (tab_index, &window) in frame.windows.iter().enumerate() {
+                    let is_focused_tab = tab_index == frame.focused;
+                    windows.push(WindowInfo {
+                        id: window,
+                        title: self.get_window_title(window),
+                        frame: format!("{:?}", frame_id),
+                        tab_index,
+                        is_focused: is_focused_frame && is_focused_tab && self.focused_window == Some(window),
+                        is_visible: is_focused_tab, // Only the focused tab is visible
+                    });
+                }
+            }
+        }
+
+        windows
+    }
+
+    /// Validate WM state invariants
+    fn validate_state(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+
+        // Check: focused window should be in layout
+        if let Some(w) = self.focused_window {
+            if self.layout.find_window(w).is_none() {
+                violations.push(format!("Focused window 0x{:x} is not in layout", w));
+            }
+        }
+
+        // Check: focused frame should exist
+        if self.layout.get(self.layout.focused).is_none() {
+            violations.push(format!("Focused frame {:?} does not exist", self.layout.focused));
+        }
+
+        // Check: all hidden windows should be in layout
+        for &w in &self.hidden_windows {
+            if self.layout.find_window(w).is_none() {
+                violations.push(format!("Hidden window 0x{:x} is not in layout", w));
+            }
+        }
+
+        // Check: tab bar windows should correspond to existing frames
+        for (frame_id, _) in &self.tab_bar_windows {
+            if self.layout.get(*frame_id).is_none() {
+                violations.push(format!("Tab bar for non-existent frame {:?}", frame_id));
+            }
+        }
+
+        violations
+    }
+
+    /// Capture a screenshot and save it to the specified path
+    fn capture_screenshot(&self, path: &str) -> Result<()> {
+        use image::{ImageBuffer, Rgba};
+
+        let geometry = self.conn.get_geometry(self.root)?.reply()?;
+
+        let image_reply = self.conn.get_image(
+            ImageFormat::Z_PIXMAP,
+            self.root,
+            0,
+            0,
+            geometry.width,
+            geometry.height,
+            !0, // all planes
+        )?.reply()?;
+
+        // Convert the image data to RGBA
+        // X11 typically returns BGRA format for 32-bit depth
+        let depth = image_reply.depth;
+        let data = &image_reply.data;
+
+        let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(
+            geometry.width as u32,
+            geometry.height as u32,
+        );
+
+        if depth == 24 || depth == 32 {
+            // BGRA or BGR format
+            let bytes_per_pixel = if depth == 32 { 4 } else { 3 };
+            let stride = geometry.width as usize * bytes_per_pixel;
+
+            for y in 0..geometry.height as usize {
+                for x in 0..geometry.width as usize {
+                    let offset = y * stride + x * bytes_per_pixel;
+                    if offset + 2 < data.len() {
+                        let b = data[offset];
+                        let g = data[offset + 1];
+                        let r = data[offset + 2];
+                        let a = if bytes_per_pixel == 4 && offset + 3 < data.len() {
+                            data[offset + 3]
+                        } else {
+                            255
+                        };
+                        img.put_pixel(x as u32, y as u32, Rgba([r, g, b, a]));
+                    }
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!("Unsupported color depth: {}", depth));
+        }
+
+        img.save(path).context("Failed to save screenshot")?;
+        log::info!("Screenshot saved to {}", path);
+
         Ok(())
     }
 }

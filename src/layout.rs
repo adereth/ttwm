@@ -4,6 +4,7 @@
 //! - Leaf nodes are Frames (contain windows)
 //! - Internal nodes are Splits (horizontal or vertical)
 
+use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
 use x11rb::protocol::xproto::Window;
 
@@ -14,7 +15,8 @@ new_key_type! {
 }
 
 /// Direction of a split
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SplitDirection {
     /// Children arranged left-to-right
     Horizontal,
@@ -23,7 +25,7 @@ pub enum SplitDirection {
 }
 
 /// A rectangle representing geometry
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -388,5 +390,725 @@ impl LayoutTree {
             }
         }
         windows
+    }
+
+    /// Resize the split containing the focused frame
+    /// delta > 0 grows the focused frame, delta < 0 shrinks it
+    pub fn resize_focused_split(&mut self, delta: f32) -> bool {
+        let parent_id = match self.parent(self.focused) {
+            Some(id) => id,
+            None => return false, // No parent split to resize
+        };
+
+        if let Some(Node::Split(split)) = self.nodes.get_mut(parent_id) {
+            // Determine if focused is the first or second child
+            let is_first = split.first == self.focused;
+
+            // Adjust ratio (first child's share)
+            let adjustment = if is_first { delta } else { -delta };
+            split.ratio = (split.ratio + adjustment).clamp(0.1, 0.9);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove empty frames from the tree
+    /// Returns true if any cleanup was performed
+    pub fn remove_empty_frames(&mut self) -> bool {
+        let mut changed = false;
+
+        loop {
+            // Find an empty frame that isn't the only node
+            let empty_frame = self.nodes.iter()
+                .find(|(id, node)| {
+                    if let Node::Frame(frame) = node {
+                        frame.is_empty() && *id != self.root
+                    } else {
+                        false
+                    }
+                })
+                .map(|(id, _)| id);
+
+            let frame_id = match empty_frame {
+                Some(id) => id,
+                None => break, // No more empty frames to remove
+            };
+
+            // Get the parent split
+            let parent_id = match self.parent(frame_id) {
+                Some(id) => id,
+                None => break, // This shouldn't happen for non-root frames
+            };
+
+            // Get the sibling
+            let sibling_id = if let Some(Node::Split(split)) = self.nodes.get(parent_id) {
+                if split.first == frame_id {
+                    split.second
+                } else {
+                    split.first
+                }
+            } else {
+                break;
+            };
+
+            // Get grandparent
+            let grandparent_id = self.parent(parent_id);
+
+            // Replace parent split with sibling
+            if let Some(gp_id) = grandparent_id {
+                // Update grandparent's child reference
+                if let Some(Node::Split(gp_split)) = self.nodes.get_mut(gp_id) {
+                    if gp_split.first == parent_id {
+                        gp_split.first = sibling_id;
+                    } else {
+                        gp_split.second = sibling_id;
+                    }
+                }
+                // Update sibling's parent
+                if let Some(p) = self.parents.get_mut(sibling_id) {
+                    *p = Some(gp_id);
+                }
+            } else {
+                // Parent was root, sibling becomes new root
+                self.root = sibling_id;
+                if let Some(p) = self.parents.get_mut(sibling_id) {
+                    *p = None;
+                }
+            }
+
+            // Remove the empty frame and the parent split
+            self.nodes.remove(frame_id);
+            self.parents.remove(frame_id);
+            self.nodes.remove(parent_id);
+            self.parents.remove(parent_id);
+
+            // Update focused if needed
+            if self.focused == frame_id {
+                // Focus the first frame we can find
+                self.focused = self.all_frames().first().copied().unwrap_or(self.root);
+            }
+
+            changed = true;
+        }
+
+        changed
+    }
+
+    /// Cycle to the next/previous tab in the focused frame
+    /// Returns the newly focused window (if any)
+    pub fn cycle_tab(&mut self, forward: bool) -> Option<Window> {
+        let frame = self.focused_frame_mut()?;
+        if frame.windows.is_empty() {
+            return None;
+        }
+
+        let len = frame.windows.len();
+        frame.focused = if forward {
+            (frame.focused + 1) % len
+        } else {
+            if frame.focused == 0 { len - 1 } else { frame.focused - 1 }
+        };
+
+        frame.focused_window()
+    }
+
+    /// Focus a specific tab by index (0-based) in the focused frame
+    /// Returns the newly focused window (if any)
+    pub fn focus_tab(&mut self, index: usize) -> Option<Window> {
+        let frame = self.focused_frame_mut()?;
+        if index < frame.windows.len() {
+            frame.focused = index;
+            frame.focused_window()
+        } else {
+            None
+        }
+    }
+
+    /// Get number of tabs in the focused frame
+    pub fn tab_count(&self) -> usize {
+        self.focused_frame().map(|f| f.windows.len()).unwrap_or(0)
+    }
+
+    /// Move the focused window to an adjacent frame
+    /// Returns the window that was moved (if any)
+    pub fn move_window_to_adjacent(&mut self, forward: bool) -> Option<Window> {
+        let frames = self.all_frames();
+        if frames.len() <= 1 {
+            return None;
+        }
+
+        // Get the focused window
+        let window = self.focused_frame()?.focused_window()?;
+
+        // Find current frame index
+        let current_idx = frames.iter().position(|&f| f == self.focused)?;
+
+        // Find adjacent frame
+        let adjacent_idx = if forward {
+            (current_idx + 1) % frames.len()
+        } else {
+            if current_idx == 0 { frames.len() - 1 } else { current_idx - 1 }
+        };
+
+        let adjacent_frame_id = frames[adjacent_idx];
+
+        // Remove window from current frame
+        if let Some(Node::Frame(frame)) = self.nodes.get_mut(self.focused) {
+            frame.remove_window(window);
+        }
+
+        // Add window to adjacent frame
+        if let Some(Node::Frame(frame)) = self.nodes.get_mut(adjacent_frame_id) {
+            frame.add_window(window);
+        }
+
+        // Focus the adjacent frame
+        self.focused = adjacent_frame_id;
+
+        Some(window)
+    }
+
+    /// Create a snapshot of the layout tree for IPC serialization
+    /// The geometries parameter should be pre-calculated if you want geometry info
+    pub fn snapshot(&self, geometries: Option<&[(NodeId, Rect)]>) -> crate::ipc::LayoutSnapshot {
+        use crate::ipc::{LayoutSnapshot, NodeSnapshot, RectSnapshot};
+
+        fn snapshot_node(
+            tree: &LayoutTree,
+            node_id: NodeId,
+            geometries: Option<&[(NodeId, Rect)]>,
+        ) -> NodeSnapshot {
+            match tree.get(node_id) {
+                Some(Node::Frame(frame)) => {
+                    let geometry = geometries.and_then(|g| {
+                        g.iter()
+                            .find(|(id, _)| *id == node_id)
+                            .map(|(_, r)| RectSnapshot::from(*r))
+                    });
+                    NodeSnapshot::Frame {
+                        id: format!("{:?}", node_id),
+                        windows: frame.windows.clone(),
+                        focused_tab: frame.focused,
+                        geometry,
+                    }
+                }
+                Some(Node::Split(split)) => {
+                    let direction = match split.direction {
+                        SplitDirection::Horizontal => "horizontal",
+                        SplitDirection::Vertical => "vertical",
+                    };
+                    NodeSnapshot::Split {
+                        id: format!("{:?}", node_id),
+                        direction: direction.to_string(),
+                        ratio: split.ratio,
+                        first: Box::new(snapshot_node(tree, split.first, geometries)),
+                        second: Box::new(snapshot_node(tree, split.second, geometries)),
+                    }
+                }
+                None => NodeSnapshot::Frame {
+                    id: "invalid".to_string(),
+                    windows: vec![],
+                    focused_tab: 0,
+                    geometry: None,
+                },
+            }
+        }
+
+        LayoutSnapshot {
+            root: snapshot_node(self, self.root, geometries),
+        }
+    }
+
+    /// Get the focused frame's NodeId as a string (for IPC)
+    pub fn focused_frame_id(&self) -> String {
+        format!("{:?}", self.focused)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== Tree Creation Tests ====================
+
+    #[test]
+    fn test_new_tree_has_single_frame() {
+        let tree = LayoutTree::new();
+
+        // Should have exactly one frame
+        let frames = tree.all_frames();
+        assert_eq!(frames.len(), 1);
+
+        // Root should be the focused frame
+        assert_eq!(tree.root, tree.focused);
+
+        // Frame should be empty
+        let frame = tree.focused_frame().unwrap();
+        assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn test_root_has_no_parent() {
+        let tree = LayoutTree::new();
+        assert!(tree.parent(tree.root).is_none());
+    }
+
+    // ==================== Split Tests ====================
+
+    #[test]
+    fn test_split_horizontal_creates_two_frames() {
+        let mut tree = LayoutTree::new();
+        let original_root = tree.root;
+
+        tree.split_focused(SplitDirection::Horizontal);
+
+        // Should now have 2 frames
+        let frames = tree.all_frames();
+        assert_eq!(frames.len(), 2);
+
+        // Root should now be a split, not the original frame
+        assert_ne!(tree.root, original_root);
+        assert!(tree.get(tree.root).unwrap().as_split().is_some());
+    }
+
+    #[test]
+    fn test_split_vertical_creates_two_frames() {
+        let mut tree = LayoutTree::new();
+
+        tree.split_focused(SplitDirection::Vertical);
+
+        let frames = tree.all_frames();
+        assert_eq!(frames.len(), 2);
+
+        // Check the split direction
+        let split = tree.get(tree.root).unwrap().as_split().unwrap();
+        assert_eq!(split.direction, SplitDirection::Vertical);
+    }
+
+    #[test]
+    fn test_split_focuses_new_frame() {
+        let mut tree = LayoutTree::new();
+        let original_focused = tree.focused;
+
+        let new_frame = tree.split_focused(SplitDirection::Horizontal);
+
+        // Focus should move to the new frame
+        assert_eq!(tree.focused, new_frame);
+        assert_ne!(tree.focused, original_focused);
+    }
+
+    #[test]
+    fn test_nested_splits() {
+        let mut tree = LayoutTree::new();
+
+        // Split horizontally, then vertically
+        tree.split_focused(SplitDirection::Horizontal);
+        tree.split_focused(SplitDirection::Vertical);
+
+        // Should have 3 frames now
+        let frames = tree.all_frames();
+        assert_eq!(frames.len(), 3);
+    }
+
+    #[test]
+    fn test_split_ratio_is_half() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        let split = tree.get(tree.root).unwrap().as_split().unwrap();
+        assert_eq!(split.ratio, 0.5);
+    }
+
+    // ==================== Geometry Tests ====================
+
+    #[test]
+    fn test_single_frame_fills_screen() {
+        let tree = LayoutTree::new();
+        let screen = Rect::new(0, 0, 1920, 1080);
+
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        assert_eq!(geometries.len(), 1);
+        let (_, rect) = &geometries[0];
+        assert_eq!(rect.x, 0);
+        assert_eq!(rect.y, 0);
+        assert_eq!(rect.width, 1920);
+        assert_eq!(rect.height, 1080);
+    }
+
+    #[test]
+    fn test_horizontal_split_divides_width() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        assert_eq!(geometries.len(), 2);
+
+        // Both should have same height
+        assert_eq!(geometries[0].1.height, 500);
+        assert_eq!(geometries[1].1.height, 500);
+
+        // Widths should roughly add up (allowing for gap calculations)
+        let total_width = geometries[0].1.width + geometries[1].1.width;
+        assert!(total_width <= 1000);
+    }
+
+    #[test]
+    fn test_vertical_split_divides_height() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Vertical);
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        assert_eq!(geometries.len(), 2);
+
+        // Both should have same width
+        assert_eq!(geometries[0].1.width, 1000);
+        assert_eq!(geometries[1].1.width, 1000);
+
+        // Heights should roughly add up
+        let total_height = geometries[0].1.height + geometries[1].1.height;
+        assert!(total_height <= 500);
+    }
+
+    #[test]
+    fn test_gaps_reduce_available_space() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let gap = 20;
+        let geometries = tree.calculate_geometries(screen, gap);
+
+        // With a gap, total width should be less
+        let total_width = geometries[0].1.width + geometries[1].1.width;
+        assert!(total_width < 1000);
+
+        // Second rect should start after first + gap
+        let expected_x = geometries[0].1.x + geometries[0].1.width as i32 + gap as i32;
+        assert_eq!(geometries[1].1.x, expected_x);
+    }
+
+    // ==================== Frame/Window Tests ====================
+
+    #[test]
+    fn test_add_window_to_frame() {
+        let mut tree = LayoutTree::new();
+
+        tree.add_window(1001);
+
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.windows.len(), 1);
+        assert_eq!(frame.windows[0], 1001);
+    }
+
+    #[test]
+    fn test_add_multiple_windows() {
+        let mut tree = LayoutTree::new();
+
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.windows.len(), 3);
+    }
+
+    #[test]
+    fn test_add_window_focuses_it() {
+        let mut tree = LayoutTree::new();
+
+        tree.add_window(1001);
+        tree.add_window(1002);
+
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.focused, 1); // Second window (index 1)
+        assert_eq!(frame.focused_window(), Some(1002));
+    }
+
+    #[test]
+    fn test_remove_window() {
+        let mut tree = LayoutTree::new();
+
+        tree.add_window(1001);
+        tree.add_window(1002);
+
+        let removed = tree.remove_window(1001);
+        assert!(removed.is_some());
+
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.windows.len(), 1);
+        assert_eq!(frame.windows[0], 1002);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_window() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        let removed = tree.remove_window(9999);
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_find_window() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        let found = tree.find_window(1001);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), tree.focused);
+    }
+
+    #[test]
+    fn test_find_window_not_found() {
+        let tree = LayoutTree::new();
+        assert!(tree.find_window(9999).is_none());
+    }
+
+    // ==================== Tab Cycling Tests ====================
+
+    #[test]
+    fn test_cycle_tab_forward() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        // Currently focused on 1003 (last added)
+        let next = tree.cycle_tab(true);
+        assert_eq!(next, Some(1001)); // Wraps around
+
+        let next = tree.cycle_tab(true);
+        assert_eq!(next, Some(1002));
+    }
+
+    #[test]
+    fn test_cycle_tab_backward() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        // Currently focused on 1003 (index 2)
+        let prev = tree.cycle_tab(false);
+        assert_eq!(prev, Some(1002));
+
+        let prev = tree.cycle_tab(false);
+        assert_eq!(prev, Some(1001));
+
+        let prev = tree.cycle_tab(false);
+        assert_eq!(prev, Some(1003)); // Wraps around
+    }
+
+    #[test]
+    fn test_cycle_tab_empty_frame() {
+        let mut tree = LayoutTree::new();
+
+        let result = tree.cycle_tab(true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cycle_tab_single_window() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        let result = tree.cycle_tab(true);
+        assert_eq!(result, Some(1001)); // Stays on same window
+    }
+
+    #[test]
+    fn test_focus_tab_by_index() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+        tree.add_window(1003);
+
+        let result = tree.focus_tab(0);
+        assert_eq!(result, Some(1001));
+
+        let result = tree.focus_tab(2);
+        assert_eq!(result, Some(1003));
+    }
+
+    #[test]
+    fn test_focus_tab_out_of_bounds() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        let result = tree.focus_tab(5);
+        assert!(result.is_none());
+    }
+
+    // ==================== Empty Frame Cleanup Tests ====================
+
+    #[test]
+    fn test_remove_empty_frames_single_frame() {
+        let mut tree = LayoutTree::new();
+
+        // Single empty frame at root should NOT be removed
+        let changed = tree.remove_empty_frames();
+        assert!(!changed);
+        assert_eq!(tree.all_frames().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_empty_frames_after_split() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.split_focused(SplitDirection::Horizontal);
+
+        // Now we have: [frame with window] | [empty frame (focused)]
+        // The empty frame should be removed
+        let changed = tree.remove_empty_frames();
+        assert!(changed);
+
+        // Should be back to 1 frame
+        assert_eq!(tree.all_frames().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_empty_frames_preserves_windows() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.split_focused(SplitDirection::Horizontal);
+        tree.add_window(1002);
+
+        // Remove 1002, making the second frame empty
+        tree.remove_window(1002);
+        tree.remove_empty_frames();
+
+        // Window 1001 should still exist
+        assert!(tree.find_window(1001).is_some());
+        assert_eq!(tree.all_windows().len(), 1);
+    }
+
+    // ==================== Move Window Tests ====================
+
+    #[test]
+    fn test_move_window_to_adjacent_forward() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.split_focused(SplitDirection::Horizontal);
+
+        // Focus back to first frame
+        tree.focus_direction(SplitDirection::Horizontal, false);
+
+        // Move window forward
+        let moved = tree.move_window_to_adjacent(true);
+        assert_eq!(moved, Some(1001));
+
+        // Window should now be in the second frame
+        assert_eq!(tree.focused_frame().unwrap().windows.len(), 1);
+    }
+
+    #[test]
+    fn test_move_window_single_frame() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+
+        // Can't move with only one frame
+        let moved = tree.move_window_to_adjacent(true);
+        assert!(moved.is_none());
+    }
+
+    // ==================== Resize Tests ====================
+
+    #[test]
+    fn test_resize_focused_split() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        // Focus first frame
+        tree.focus_direction(SplitDirection::Horizontal, false);
+
+        let original_ratio = tree.get(tree.root).unwrap().as_split().unwrap().ratio;
+
+        tree.resize_focused_split(0.1);
+
+        let new_ratio = tree.get(tree.root).unwrap().as_split().unwrap().ratio;
+        assert!(new_ratio > original_ratio);
+    }
+
+    #[test]
+    fn test_resize_clamps_ratio() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        // Try to resize way past the limit
+        for _ in 0..20 {
+            tree.resize_focused_split(0.1);
+        }
+
+        let ratio = tree.get(tree.root).unwrap().as_split().unwrap().ratio;
+        assert!(ratio <= 0.9);
+        assert!(ratio >= 0.1);
+    }
+
+    #[test]
+    fn test_resize_no_parent() {
+        let mut tree = LayoutTree::new();
+
+        // Single frame has no parent split
+        let resized = tree.resize_focused_split(0.1);
+        assert!(!resized);
+    }
+
+    // ==================== Frame Operations Tests ====================
+
+    #[test]
+    fn test_frame_remove_adjusts_focus() {
+        let mut frame = Frame::new();
+        frame.add_window(1001);
+        frame.add_window(1002);
+        frame.add_window(1003);
+
+        // Focus is on 1003 (index 2)
+        assert_eq!(frame.focused, 2);
+
+        // Remove focused window
+        frame.remove_window(1003);
+
+        // Focus should move to last remaining
+        assert_eq!(frame.focused, 1);
+        assert_eq!(frame.focused_window(), Some(1002));
+    }
+
+    #[test]
+    fn test_frame_remove_middle() {
+        let mut frame = Frame::new();
+        frame.add_window(1001);
+        frame.add_window(1002);
+        frame.add_window(1003);
+
+        frame.focused = 0; // Focus first
+        frame.remove_window(1002); // Remove middle
+
+        // Focus should stay at 0
+        assert_eq!(frame.focused, 0);
+        assert_eq!(frame.focused_window(), Some(1001));
+    }
+
+    // ==================== All Windows Tests ====================
+
+    #[test]
+    fn test_all_windows_multiple_frames() {
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.split_focused(SplitDirection::Horizontal);
+        tree.add_window(1002);
+        tree.split_focused(SplitDirection::Vertical);
+        tree.add_window(1003);
+
+        let all = tree.all_windows();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&1001));
+        assert!(all.contains(&1002));
+        assert!(all.contains(&1003));
     }
 }

@@ -22,13 +22,23 @@ env_logger = "0.11"
 # Arena-based tree storage
 slotmap = "1.0"
 
+# Serialization for IPC
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Image encoding for screenshots (use minimal features to avoid dependency issues)
+image = { version = "0.24", default-features = false, features = ["png"] }
+
 # Will be added in later milestones:
-# serde = { version = "1", features = ["derive"] }  # Milestone 6: Config
 # toml = "0.8"              # Milestone 6: Config
-# tokio = { version = "1", features = ["rt", "net", "sync", "macros"] }  # Milestone 8: IPC
-# serde_json = "1"          # Milestone 8: IPC
-# clap = { version = "4", features = ["derive"] }   # CLI args
 
 [[bin]]
 name = "ttwm"
 path = "src/main.rs"
+
+[[bin]]
+name = "ttwmctl"
+path = "src/bin/ttwmctl.rs"
