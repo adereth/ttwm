@@ -1120,11 +1120,6 @@ impl Wm {
 
     /// Handle button press event (click on tab bar)
     fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
-        // Only handle left click
-        if event.detail != 1 {
-            return Ok(());
-        }
-
         // Find which frame's tab bar was clicked
         let mut clicked_frame = None;
         for (&frame_id, &tab_window) in &self.tab_bar_windows {
@@ -1138,6 +1133,28 @@ impl Wm {
             Some(id) => id,
             None => return Ok(()),
         };
+
+        // Handle middle click - remove empty frame
+        if event.detail == 2 {
+            if let Some(frame) = self.layout.get(frame_id).and_then(|n| n.as_frame()) {
+                if frame.is_empty() {
+                    // Remove tab bar window
+                    if let Some(tab_window) = self.tab_bar_windows.remove(&frame_id) {
+                        self.conn.destroy_window(tab_window)?;
+                    }
+                    // Remove empty frame from layout
+                    self.layout.remove_empty_frames();
+                    self.apply_layout()?;
+                    log::info!("Removed empty frame via middle-click");
+                }
+            }
+            return Ok(());
+        }
+
+        // Only handle left click for tab selection/drag
+        if event.detail != 1 {
+            return Ok(());
+        }
 
         // Get frame geometry
         let screen_rect = self.usable_screen();
