@@ -413,6 +413,96 @@ impl LayoutTree {
         }
     }
 
+    /// Set the ratio of a specific split node directly
+    /// Returns true if the split was found and updated
+    pub fn set_split_ratio(&mut self, split_id: NodeId, ratio: f32) -> bool {
+        if let Some(Node::Split(split)) = self.nodes.get_mut(split_id) {
+            split.ratio = ratio.clamp(0.1, 0.9);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Find a split whose gap contains the given mouse coordinates
+    /// Returns (split_id, direction, gap_start_position, total_size_in_split_direction)
+    pub fn find_split_at_gap(
+        &self,
+        screen: Rect,
+        gap: u32,
+        mouse_x: i32,
+        mouse_y: i32,
+    ) -> Option<(NodeId, SplitDirection, i32, u32)> {
+        self.find_gap_recursive(self.root, screen, gap, mouse_x, mouse_y)
+    }
+
+    fn find_gap_recursive(
+        &self,
+        node_id: NodeId,
+        available: Rect,
+        gap: u32,
+        mouse_x: i32,
+        mouse_y: i32,
+    ) -> Option<(NodeId, SplitDirection, i32, u32)> {
+        match self.get(node_id) {
+            Some(Node::Frame(_)) => None, // Frames don't have gaps
+            Some(Node::Split(split)) => {
+                let (first_rect, second_rect) = Self::split_rect(
+                    available,
+                    split.direction,
+                    split.ratio,
+                    gap,
+                );
+
+                // Calculate the gap region
+                let (gap_start, gap_end, perpendicular_start, perpendicular_end) = match split.direction {
+                    SplitDirection::Horizontal => {
+                        // Gap is between first_rect.x + first_rect.width and second_rect.x
+                        let gap_x_start = first_rect.x + first_rect.width as i32;
+                        let gap_x_end = second_rect.x;
+                        (gap_x_start, gap_x_end, available.y, available.y + available.height as i32)
+                    }
+                    SplitDirection::Vertical => {
+                        // Gap is between first_rect.y + first_rect.height and second_rect.y
+                        let gap_y_start = first_rect.y + first_rect.height as i32;
+                        let gap_y_end = second_rect.y;
+                        (gap_y_start, gap_y_end, available.x, available.x + available.width as i32)
+                    }
+                };
+
+                // Check if mouse is in this gap
+                let (mouse_parallel, mouse_perpendicular) = match split.direction {
+                    SplitDirection::Horizontal => (mouse_x, mouse_y),
+                    SplitDirection::Vertical => (mouse_y, mouse_x),
+                };
+
+                if mouse_parallel >= gap_start
+                    && mouse_parallel < gap_end
+                    && mouse_perpendicular >= perpendicular_start
+                    && mouse_perpendicular < perpendicular_end
+                {
+                    // Mouse is in this gap
+                    let (split_start, total_size) = match split.direction {
+                        SplitDirection::Horizontal => (available.x, available.width),
+                        SplitDirection::Vertical => (available.y, available.height),
+                    };
+                    return Some((node_id, split.direction, split_start, total_size));
+                }
+
+                // Check children recursively
+                if let Some(result) = self.find_gap_recursive(split.first, first_rect, gap, mouse_x, mouse_y) {
+                    return Some(result);
+                }
+                if let Some(result) = self.find_gap_recursive(split.second, second_rect, gap, mouse_x, mouse_y) {
+                    return Some(result);
+                }
+
+                None
+            }
+            None => None,
+        }
+    }
+
     /// Remove empty frames from the tree
     /// Returns true if any cleanup was performed
     pub fn remove_empty_frames(&mut self) -> bool {

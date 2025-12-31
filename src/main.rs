@@ -382,14 +382,28 @@ impl FontRenderer {
     }
 }
 
-/// Drag state for tab drag-and-drop
-struct DragState {
-    /// Window being dragged
-    window: Window,
-    /// Original frame the window was in
-    source_frame: NodeId,
-    /// Original tab index
-    source_index: usize,
+/// Drag state for tab drag-and-drop or resize operations
+enum DragState {
+    /// Dragging a tab between frames
+    Tab {
+        /// Window being dragged
+        window: Window,
+        /// Original frame the window was in
+        source_frame: NodeId,
+        /// Original tab index
+        source_index: usize,
+    },
+    /// Resizing a split by dragging the gap
+    Resize {
+        /// The split node being resized
+        split_id: NodeId,
+        /// Direction of the split
+        direction: SplitDirection,
+        /// Starting position of the resizable area (x for horizontal, y for vertical)
+        split_start: i32,
+        /// Total size in the split direction
+        total_size: u32,
+    },
 }
 
 /// The main window manager state
@@ -426,6 +440,10 @@ struct Wm {
     drag_state: Option<DragState>,
     /// Font renderer for tab text
     font_renderer: FontRenderer,
+    /// Horizontal resize cursor
+    cursor_resize_h: Cursor,
+    /// Vertical resize cursor
+    cursor_resize_v: Cursor,
 }
 
 impl Wm {
@@ -507,6 +525,36 @@ impl Wm {
             border_unfocused: parse_color(&user_config.colors.border_unfocused).unwrap_or(0x3a3a3a),
         };
 
+        // Create resize cursors from the cursor font
+        let cursor_font = conn.generate_id()?;
+        conn.open_font(cursor_font, b"cursor")?;
+
+        // XC_sb_h_double_arrow = 108 (horizontal resize)
+        let cursor_resize_h = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_resize_h,
+            cursor_font,
+            cursor_font,
+            108,      // source glyph (arrow shape)
+            108 + 1,  // mask glyph (solid fill)
+            0, 0, 0,  // foreground RGB (black)
+            0xFFFF, 0xFFFF, 0xFFFF,  // background RGB (white)
+        )?;
+
+        // XC_sb_v_double_arrow = 116 (vertical resize)
+        let cursor_resize_v = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_resize_v,
+            cursor_font,
+            cursor_font,
+            116,      // source glyph (arrow shape)
+            116 + 1,  // mask glyph (solid fill)
+            0, 0, 0,  // foreground RGB (black)
+            0xFFFF, 0xFFFF, 0xFFFF,  // background RGB (white)
+        )?;
+
+        conn.close_font(cursor_font)?;
+
         Ok(Self {
             conn,
             screen_num,
@@ -526,6 +574,8 @@ impl Wm {
             keybindings,
             drag_state: None,
             font_renderer,
+            cursor_resize_h,
+            cursor_resize_v,
         })
     }
 
@@ -541,7 +591,8 @@ impl Wm {
         let event_mask = EventMask::SUBSTRUCTURE_REDIRECT
             | EventMask::SUBSTRUCTURE_NOTIFY
             | EventMask::ENTER_WINDOW  // For focus-follows-mouse
-            | EventMask::STRUCTURE_NOTIFY;
+            | EventMask::STRUCTURE_NOTIFY
+            | EventMask::BUTTON_PRESS; // For gap resize detection
 
         let result = self.conn.change_window_attributes(
             self.root,
@@ -1247,8 +1298,8 @@ impl Wm {
     /// Unmanage a window
     fn unmanage_window(&mut self, window: Window) {
         // Cancel drag if we're dragging this window
-        if let Some(ref drag) = self.drag_state {
-            if drag.window == window {
+        if let Some(DragState::Tab { window: dragged_window, .. }) = self.drag_state {
+            if dragged_window == window {
                 // Ungrab pointer and clear drag state
                 let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
                 self.drag_state = None;
@@ -1618,9 +1669,22 @@ impl Wm {
                 self.handle_button_release(e)?;
             }
 
-            Event::MotionNotify(_e) => {
-                // Motion events are received during drag but we don't need to process them
-                // The drop target is determined at button release time
+            Event::MotionNotify(e) => {
+                // Handle resize drag - update split ratio in real-time
+                if let Some(DragState::Resize { split_id, direction, split_start, total_size }) = &self.drag_state {
+                    // Calculate new ratio from mouse position
+                    let mouse_pos = match direction {
+                        SplitDirection::Horizontal => e.root_x as i32,
+                        SplitDirection::Vertical => e.root_y as i32,
+                    };
+                    let ratio = ((mouse_pos - split_start) as f32) / (*total_size as f32);
+
+                    // Update split and relayout
+                    if self.layout.set_split_ratio(*split_id, ratio) {
+                        self.apply_layout()?;
+                    }
+                }
+                // Tab drags don't need motion processing - drop target determined at release
             }
 
             _ => {
@@ -1652,8 +1716,44 @@ impl Wm {
         Ok(())
     }
 
-    /// Handle button press event (click on tab bar)
+    /// Handle button press event (click on tab bar or gap for resize)
     fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
+        // Check if click is on root window (potential gap resize)
+        if event.event == self.root && event.detail == 1 {
+            let screen = self.usable_screen();
+            if let Some((split_id, direction, split_start, total_size)) =
+                self.layout.find_split_at_gap(screen, self.config.gap, event.root_x as i32, event.root_y as i32)
+            {
+                // Select the appropriate resize cursor based on split direction
+                let resize_cursor = match direction {
+                    SplitDirection::Horizontal => self.cursor_resize_h,
+                    SplitDirection::Vertical => self.cursor_resize_v,
+                };
+
+                // Start resize drag - grab pointer to track motion
+                self.conn.grab_pointer(
+                    false,
+                    self.root,
+                    EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    x11rb::NONE,  // confine_to
+                    resize_cursor,
+                    x11rb::CURRENT_TIME,
+                )?;
+
+                self.drag_state = Some(DragState::Resize {
+                    split_id,
+                    direction,
+                    split_start,
+                    total_size,
+                });
+
+                log::info!("Started gap resize for {:?} split", direction);
+                return Ok(());
+            }
+        }
+
         // Find which frame's tab bar was clicked
         let mut clicked_frame = None;
         for (&frame_id, &tab_window) in &self.tab_bar_windows {
@@ -1731,7 +1831,7 @@ impl Wm {
                             x11rb::CURRENT_TIME,
                         )?;
 
-                        self.drag_state = Some(DragState {
+                        self.drag_state = Some(DragState::Tab {
                             window,
                             source_frame: frame_id,
                             source_index: clicked_tab,
@@ -1798,35 +1898,45 @@ impl Wm {
 
         // Ungrab pointer
         self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?;
+        self.conn.flush()?;
 
         let drag = match self.drag_state.take() {
             Some(d) => d,
             None => return Ok(()),
         };
 
-        // Find what's under the cursor at root coordinates
-        let (target_frame, target_index) = self.find_drop_target(event.root_x, event.root_y)?;
+        match drag {
+            DragState::Tab { window, source_frame, source_index } => {
+                // Find what's under the cursor at root coordinates
+                let (target_frame, target_index) = self.find_drop_target(event.root_x, event.root_y)?;
 
-        if let Some(target_frame) = target_frame {
-            if target_frame == drag.source_frame {
-                // Reorder within same frame
-                if let Some(target_idx) = target_index {
-                    if target_idx != drag.source_index {
-                        self.layout.reorder_tab(target_frame, drag.source_index, target_idx);
-                        log::info!("Reordered tab from {} to {}", drag.source_index + 1, target_idx + 1);
+                if let Some(target_frame) = target_frame {
+                    if target_frame == source_frame {
+                        // Reorder within same frame
+                        if let Some(target_idx) = target_index {
+                            if target_idx != source_index {
+                                self.layout.reorder_tab(target_frame, source_index, target_idx);
+                                log::info!("Reordered tab from {} to {}", source_index + 1, target_idx + 1);
+                            }
+                        }
+                    } else {
+                        // Move to different frame
+                        self.layout.move_window_to_frame(window, source_frame, target_frame);
+
+                        log::info!("Moved window 0x{:x} to different frame", window);
                     }
+
+                    self.apply_layout()?;
+                    self.focus_window(window)?;
+                } else {
+                    log::info!("Drag cancelled - released outside any frame");
                 }
-            } else {
-                // Move to different frame
-                self.layout.move_window_to_frame(drag.window, drag.source_frame, target_frame);
-
-                log::info!("Moved window 0x{:x} to different frame", drag.window);
             }
-
-            self.apply_layout()?;
-            self.focus_window(drag.window)?;
-        } else {
-            log::info!("Drag cancelled - released outside any frame");
+            DragState::Resize { .. } => {
+                // Resize is complete - nothing more to do
+                // (resizing happens during motion, not on release)
+                log::info!("Resize drag completed");
+            }
         }
 
         Ok(())
