@@ -877,7 +877,20 @@ impl Wm {
         let h_padding: i16 = 12;    // Horizontal text padding
         let corner_radius: u32 = 6; // Rounded corner radius
 
-        // Draw background by sampling root window (pseudo-transparency)
+        // Always clear first with solid color to ensure old content is erased
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: rect.width as u16,
+                height: height as u16,
+            }],
+        )?;
+
+        // Then sample and draw root background on top (pseudo-transparency)
         if let Some(pixels) = self.sample_root_background(
             rect.x as i16,
             rect.y as i16,
@@ -894,19 +907,6 @@ impl Wm {
                 0,     // left_pad
                 self.screen_depth,
                 &pixels,
-            )?;
-        } else {
-            // Fallback to solid color
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-            self.conn.poly_fill_rectangle(
-                window,
-                self.gc,
-                &[Rectangle {
-                    x: 0,
-                    y: 0,
-                    width: rect.width as u16,
-                    height: height as u16,
-                }],
             )?;
         }
 
