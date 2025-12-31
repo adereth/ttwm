@@ -310,7 +310,7 @@ impl Default for AppearanceConfig {
 impl Default for ColorConfig {
     fn default() -> Self {
         Self {
-            tab_bar_bg: "#2e2e2e".to_string(),
+            tab_bar_bg: "#000000".to_string(),
             tab_focused_bg: "#5294e2".to_string(),
             tab_unfocused_bg: "#3a3a3a".to_string(),
             tab_visible_unfocused_bg: "#4a6a9a".to_string(),

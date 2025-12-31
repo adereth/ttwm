@@ -97,7 +97,7 @@ impl Default for LayoutConfig {
             outer_gap: 8,
             border_width: 2,
             tab_bar_height: 28,
-            tab_bar_bg: 0x2e2e2e,       // Dark gray
+            tab_bar_bg: 0x000000,       // Black (fallback)
             tab_focused_bg: 0x5294e2,   // Blue (matching border)
             tab_unfocused_bg: 0x3a3a3a, // Darker gray
             tab_visible_unfocused_bg: 0x4a6a9a, // Muted blue
@@ -444,6 +444,8 @@ struct Wm {
     cursor_resize_h: Cursor,
     /// Vertical resize cursor
     cursor_resize_v: Cursor,
+    /// Screen depth (for put_image)
+    screen_depth: u8,
 }
 
 impl Wm {
@@ -455,6 +457,7 @@ impl Wm {
 
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
+        let screen_depth = screen.root_depth;
 
         log::info!(
             "Connected to X11, screen {}, root window 0x{:x}, {}x{}",
@@ -576,6 +579,7 @@ impl Wm {
             font_renderer,
             cursor_resize_h,
             cursor_resize_v,
+            screen_depth,
         })
     }
 
@@ -848,6 +852,19 @@ impl Wm {
         Ok(())
     }
 
+    /// Sample the root window background at the given position
+    /// Returns the pixel data that can be drawn with put_image
+    fn sample_root_background(&self, x: i16, y: i16, width: u16, height: u16) -> Option<Vec<u8>> {
+        let reply = self.conn.get_image(
+            ImageFormat::Z_PIXMAP,
+            self.root,
+            x, y,
+            width, height,
+            !0,  // all planes
+        ).ok()?.reply().ok()?;
+        Some(reply.data)
+    }
+
     /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
     fn draw_tab_bar(&self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
         let frame = match self.layout.get(frame_id).and_then(|n| n.as_frame()) {
@@ -860,18 +877,38 @@ impl Wm {
         let h_padding: i16 = 12;    // Horizontal text padding
         let corner_radius: u32 = 6; // Rounded corner radius
 
-        // Clear the background
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-        self.conn.poly_fill_rectangle(
-            window,
-            self.gc,
-            &[Rectangle {
-                x: 0,
-                y: 0,
-                width: rect.width as u16,
-                height: height as u16,
-            }],
-        )?;
+        // Draw background by sampling root window (pseudo-transparency)
+        if let Some(pixels) = self.sample_root_background(
+            rect.x as i16,
+            rect.y as i16,
+            rect.width as u16,
+            height as u16,
+        ) {
+            self.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                window,
+                self.gc,
+                rect.width as u16,
+                height as u16,
+                0, 0,  // destination x, y
+                0,     // left_pad
+                self.screen_depth,
+                &pixels,
+            )?;
+        } else {
+            // Fallback to solid color
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: rect.width as u16,
+                    height: height as u16,
+                }],
+            )?;
+        }
 
         // Empty frame - just show background
         if num_tabs == 0 {

@@ -13,15 +13,15 @@ outer_gap = 8
 # Window border width (pixels)
 border_width = 2
 # Tab bar height (pixels)
-tab_bar_height = 34
+tab_bar_height = 32
 # Tab bar font (fontconfig name, e.g., "monospace", "DejaVu Sans Mono", "JetBrains Mono")
 tab_font = "FreeSans"
 # Tab bar font size in points
-tab_font_size = 14
+tab_font_size = 12
 
 [colors]
 # Colors in hex format (#RRGGBB)
-tab_bar_bg = "#2e2e2e"
+tab_bar_bg = "#000000"
 tab_focused_bg = "#5294e2"
 tab_unfocused_bg = "#3a3a3a"
 # Visible tab in unfocused frame
