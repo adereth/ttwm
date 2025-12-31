@@ -1398,12 +1398,35 @@ impl Wm {
 
     /// Focus the next/previous frame
     fn focus_frame(&mut self, forward: bool) -> Result<()> {
+        let old_focused_frame = self.layout.focused;
         if self.layout.focus_direction(SplitDirection::Horizontal, forward) {
+            let new_focused_frame = self.layout.focused;
+
             // Focus the window in the new frame
             if let Some(frame) = self.layout.focused_frame() {
                 if let Some(window) = frame.focused_window() {
                     self.focus_window(window)?;
                 }
+            }
+
+            // Redraw tab bars for old and new focused frames
+            if old_focused_frame != new_focused_frame {
+                let screen_rect = self.usable_screen();
+                let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+                let geometry_map: std::collections::HashMap<_, _> = geometries.into_iter().collect();
+
+                if let Some(&tab_window) = self.tab_bar_windows.get(&old_focused_frame) {
+                    if let Some(rect) = geometry_map.get(&old_focused_frame) {
+                        self.draw_tab_bar(old_focused_frame, tab_window, rect)?;
+                    }
+                }
+                if let Some(&tab_window) = self.tab_bar_windows.get(&new_focused_frame) {
+                    if let Some(rect) = geometry_map.get(&new_focused_frame) {
+                        self.draw_tab_bar(new_focused_frame, tab_window, rect)?;
+                    }
+                }
+
+                self.conn.flush()?;
             }
         }
         Ok(())
@@ -1453,6 +1476,7 @@ impl Wm {
 
         // Also update the layout's focused frame to match
         if let Some(frame_id) = self.layout.find_window(window) {
+            let old_focused_frame = self.layout.focused;
             self.layout.focused = frame_id;
 
             // Re-raise the tab bar if this frame has one (so it stays above the window)
@@ -1461,6 +1485,27 @@ impl Wm {
                     tab_window,
                     &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
                 )?;
+            }
+
+            // Redraw tab bars (always redraw current frame, also old frame if different)
+            let screen_rect = self.usable_screen();
+            let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+            let geometry_map: std::collections::HashMap<_, _> = geometries.into_iter().collect();
+
+            // Redraw old focused frame's tab bar if it changed
+            if old_focused_frame != frame_id {
+                if let Some(&tab_window) = self.tab_bar_windows.get(&old_focused_frame) {
+                    if let Some(rect) = geometry_map.get(&old_focused_frame) {
+                        self.draw_tab_bar(old_focused_frame, tab_window, rect)?;
+                    }
+                }
+            }
+
+            // Always redraw current frame's tab bar (new tabs, focus changes, etc.)
+            if let Some(&tab_window) = self.tab_bar_windows.get(&frame_id) {
+                if let Some(rect) = geometry_map.get(&frame_id) {
+                    self.draw_tab_bar(frame_id, tab_window, rect)?;
+                }
             }
         }
 
@@ -1597,6 +1642,7 @@ impl Wm {
                 for (fid, rect) in geometries {
                     if fid == frame_id {
                         self.draw_tab_bar(frame_id, tab_window, &rect)?;
+                        self.conn.flush()?;
                         break;
                     }
                 }
