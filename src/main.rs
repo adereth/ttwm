@@ -76,10 +76,12 @@ struct LayoutConfig {
     tab_focused_bg: u32,
     /// Tab bar unfocused tab color
     tab_unfocused_bg: u32,
+    /// Visible tab in unfocused frame color
+    tab_visible_unfocused_bg: u32,
     /// Tab bar text color
     tab_text_color: u32,
-    /// Active tab accent line color
-    tab_active_accent: u32,
+    /// Tab bar text color for background tabs
+    tab_text_unfocused: u32,
     /// Tab separator color
     tab_separator: u32,
     /// Border color for focused window
@@ -98,8 +100,9 @@ impl Default for LayoutConfig {
             tab_bar_bg: 0x2e2e2e,       // Dark gray
             tab_focused_bg: 0x5294e2,   // Blue (matching border)
             tab_unfocused_bg: 0x3a3a3a, // Darker gray
+            tab_visible_unfocused_bg: 0x4a6a9a, // Muted blue
             tab_text_color: 0xffffff,   // White
-            tab_active_accent: 0x5294e2, // Blue accent line
+            tab_text_unfocused: 0x888888, // Dim gray
             tab_separator: 0x4a4a4a,    // Subtle separator
             border_focused: 0x5294e2,   // Blue
             border_unfocused: 0x3a3a3a, // Gray
@@ -496,8 +499,9 @@ impl Wm {
             tab_bar_bg: parse_color(&user_config.colors.tab_bar_bg).unwrap_or(0x2e2e2e),
             tab_focused_bg: parse_color(&user_config.colors.tab_focused_bg).unwrap_or(0x5294e2),
             tab_unfocused_bg: parse_color(&user_config.colors.tab_unfocused_bg).unwrap_or(0x3a3a3a),
+            tab_visible_unfocused_bg: parse_color(&user_config.colors.tab_visible_unfocused_bg).unwrap_or(0x4a6a9a),
             tab_text_color: parse_color(&user_config.colors.tab_text).unwrap_or(0xffffff),
-            tab_active_accent: parse_color(&user_config.colors.tab_active_accent).unwrap_or(0x5294e2),
+            tab_text_unfocused: parse_color(&user_config.colors.tab_text_unfocused).unwrap_or(0x888888),
             tab_separator: parse_color(&user_config.colors.tab_separator).unwrap_or(0x4a4a4a),
             border_focused: parse_color(&user_config.colors.border_focused).unwrap_or(0x5294e2),
             border_unfocused: parse_color(&user_config.colors.border_unfocused).unwrap_or(0x3a3a3a),
@@ -802,7 +806,6 @@ impl Wm {
 
         let num_tabs = frame.windows.len();
         let height = self.config.tab_bar_height;
-        let accent_height: u32 = 3; // Chrome-style top accent
         let h_padding: i16 = 12;    // Horizontal text padding
         let corner_radius: u32 = 6; // Rounded corner radius
 
@@ -827,15 +830,22 @@ impl Wm {
         // Get tab layout (content-based widths, left-aligned)
         let tab_layout = self.calculate_tab_layout(frame_id);
 
+        // Check if this frame is the focused frame
+        let is_focused_frame = frame_id == self.layout.focused;
+
         // Draw each tab
         for (i, &client_window) in frame.windows.iter().enumerate() {
             let (x, tab_width) = tab_layout[i];
             let is_focused = i == frame.focused;
             let is_last = i == num_tabs - 1;
 
-            // Tab background color
+            // Tab background color (3 states: focused frame visible, unfocused frame visible, background)
             let bg_color = if is_focused {
-                self.config.tab_focused_bg
+                if is_focused_frame {
+                    self.config.tab_focused_bg
+                } else {
+                    self.config.tab_visible_unfocused_bg
+                }
             } else {
                 self.config.tab_unfocused_bg
             };
@@ -845,24 +855,13 @@ impl Wm {
             self.draw_rounded_top_rect(
                 window,
                 x,
-                accent_height as i16,
+                0,
                 tab_width,
-                height - accent_height,
+                height,
                 corner_radius,
             )?;
 
-            if is_focused {
-                // Draw accent line on top with rounded corners
-                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_active_accent))?;
-                self.draw_rounded_top_rect(
-                    window,
-                    x,
-                    0,
-                    tab_width,
-                    accent_height + corner_radius, // Overlap with tab body
-                    corner_radius,
-                )?;
-            } else if !is_last {
+            if !is_focused && !is_last {
                 // Draw separator on right edge for unfocused tabs
                 self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
                 self.conn.poly_fill_rectangle(
@@ -870,9 +869,9 @@ impl Wm {
                     self.gc,
                     &[Rectangle {
                         x: x + tab_width as i16 - 1,
-                        y: (accent_height + 4) as i16,
+                        y: 4,
                         width: 1,
-                        height: (height - accent_height - 8) as u16,
+                        height: (height - 8) as u16,
                     }],
                 )?;
             }
@@ -882,17 +881,24 @@ impl Wm {
             let available_width = (tab_width as i32 - h_padding as i32 * 2).max(0) as u32;
             let display_title = self.truncate_text_to_width(&title, available_width);
 
+            // Text color (dimmer for background tabs)
+            let text_color = if is_focused {
+                self.config.tab_text_color
+            } else {
+                self.config.tab_text_unfocused
+            };
+
             // Render text with FreeType
             let (pixels, text_width, text_height) = self.font_renderer.render_text(
                 &display_title,
-                self.config.tab_text_color,
+                text_color,
                 bg_color,
             );
 
             if !pixels.is_empty() && text_width > 0 && text_height > 0 {
                 // Calculate text position (vertically centered)
                 let text_x = x + h_padding;
-                let text_y = accent_height as i16 + ((height - accent_height - text_height) / 2) as i16;
+                let text_y = ((height - text_height) / 2) as i16;
 
                 // Draw text using put_image
                 self.conn.put_image(
