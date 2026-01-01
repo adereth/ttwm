@@ -1106,8 +1106,25 @@ impl Wm {
             )?;
         }
 
-        // Empty frame - just show background
+        // Empty frame - show focus indicator if focused
         if num_tabs == 0 {
+            let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
+            if is_focused_frame {
+                // Draw accent line at top to indicate this empty frame is focused
+                let accent_height = 3u16;
+                let gc_values = ChangeGCAux::new().foreground(self.config.tab_focused_bg);
+                self.conn.change_gc(self.gc, &gc_values)?;
+                self.conn.poly_fill_rectangle(
+                    window,
+                    self.gc,
+                    &[Rectangle {
+                        x: 0,
+                        y: 0,
+                        width: rect.width as u16,
+                        height: accent_height,
+                    }],
+                )?;
+            }
             return Ok(());
         }
 
@@ -2036,6 +2053,24 @@ impl Wm {
                 log::info!("Started gap resize for {:?} split", direction);
                 return Ok(());
             }
+
+            // Check if click is in an empty frame's area
+            let geometries = self.workspaces.current().layout.calculate_geometries(screen, self.config.gap);
+            for (frame_id, rect) in &geometries {
+                if let Some(frame) = self.workspaces.current().layout.get(*frame_id).and_then(|n| n.as_frame()) {
+                    if frame.is_empty() {
+                        let click_x = event.root_x as i32;
+                        let click_y = event.root_y as i32;
+                        if click_x >= rect.x && click_x < rect.x + rect.width as i32 &&
+                           click_y >= rect.y && click_y < rect.y + rect.height as i32 {
+                            // Focus this empty frame
+                            self.workspaces.current_mut().layout.focused = *frame_id;
+                            self.apply_layout()?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
         }
 
         // Find which frame's tab bar was clicked
@@ -2084,6 +2119,9 @@ impl Wm {
                 if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
                     let num_tabs = frame.windows.len();
                     if num_tabs == 0 {
+                        // Focus the empty frame
+                        self.workspaces.current_mut().layout.focused = frame_id;
+                        self.apply_layout()?;
                         break;
                     }
 
