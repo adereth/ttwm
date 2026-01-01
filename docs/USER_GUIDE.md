@@ -206,7 +206,7 @@ border_width = 2
 tab_bar_height = 26
 
 # Tab bar font (fontconfig name)
-tab_font = "FreeSans"
+tab_font = "Segoe UI"
 
 # Tab bar font size in points
 tab_font_size = 12

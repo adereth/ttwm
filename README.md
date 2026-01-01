@@ -83,7 +83,7 @@ terminal = "alacritty"
 [appearance]
 gap = 8
 tab_bar_height = 26
-tab_font = "FreeSans"
+tab_font = "Segoe UI"
 
 [colors]
 tab_focused_bg = "#5294e2"
