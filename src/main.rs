@@ -1183,6 +1183,22 @@ impl Wm {
                 self.config.tab_unfocused_bg
             };
 
+            // Draw drop shadow for focused tabs (before tab background so it appears behind)
+            if is_focused {
+                let shadow_color = Self::darken_color(bg_color, 0.3);
+                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(shadow_color))?;
+                self.conn.poly_fill_rectangle(
+                    window,
+                    self.gc,
+                    &[Rectangle {
+                        x: x + 2,
+                        y: (height - 2) as i16,
+                        width: tab_width as u16,
+                        height: 3,
+                    }],
+                )?;
+            }
+
             // Draw tab background with rounded top corners
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
             self.draw_rounded_top_rect(
@@ -1192,6 +1208,36 @@ impl Wm {
                 tab_width,
                 height,
                 corner_radius,
+            )?;
+
+            // Draw bevel effect for 3D raised appearance
+            let bevel_light = Self::lighten_color(bg_color, 0x20);
+            let bevel_dark = Self::darken_color(bg_color, 0.7);
+
+            // Top highlight (inside rounded corners)
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_light))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: x + corner_radius as i16,
+                    y: 1,
+                    width: (tab_width - corner_radius * 2) as u16,
+                    height: 1,
+                }],
+            )?;
+
+            // Bottom shadow line
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: x,
+                    y: (height - 1) as i16,
+                    width: tab_width as u16,
+                    height: 1,
+                }],
             )?;
 
             if !is_focused && !is_last {
@@ -1526,6 +1572,22 @@ impl Wm {
         }
 
         result
+    }
+
+    /// Lighten a color by adding to RGB components (for bevel highlight)
+    fn lighten_color(color: u32, amount: u8) -> u32 {
+        let r = (((color >> 16) & 0xFF) as u16 + amount as u16).min(255) as u32;
+        let g = (((color >> 8) & 0xFF) as u16 + amount as u16).min(255) as u32;
+        let b = ((color & 0xFF) as u16 + amount as u16).min(255) as u32;
+        (r << 16) | (g << 8) | b
+    }
+
+    /// Darken a color by multiplying RGB components (for bevel shadow and drop shadow)
+    fn darken_color(color: u32, factor: f32) -> u32 {
+        let r = (((color >> 16) & 0xFF) as f32 * factor) as u32;
+        let g = (((color >> 8) & 0xFF) as f32 * factor) as u32;
+        let b = ((color & 0xFF) as f32 * factor) as u32;
+        (r << 16) | (g << 8) | b
     }
 
     /// Remove tab bar windows for frames that no longer exist
