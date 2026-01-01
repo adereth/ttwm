@@ -535,6 +535,8 @@ struct Wm {
     icon_cache: HashMap<Window, Option<CachedIcon>>,
     /// Windows that are currently tagged for batch operations
     tagged_windows: std::collections::HashSet<Window>,
+    /// Suppress EnterNotify focus changes (set after explicit focus operations)
+    suppress_enter_focus: bool,
 }
 
 impl Wm {
@@ -673,6 +675,7 @@ impl Wm {
             screen_depth,
             icon_cache: HashMap::new(),
             tagged_windows: std::collections::HashSet::new(),
+            suppress_enter_focus: false,
         })
     }
 
@@ -859,6 +862,7 @@ impl Wm {
         let tagged: Vec<Window> = self.tagged_windows.iter().copied().collect();
         let count = tagged.len();
 
+        let mut last_moved: Option<Window> = None;
         for window in tagged {
             if let Some(source_frame) = self.workspaces.current_mut().layout.find_window(window) {
                 if source_frame != target_frame {
@@ -867,12 +871,20 @@ impl Wm {
                         source_frame,
                         target_frame,
                     );
+                    last_moved = Some(window);
                 }
             }
         }
 
         self.tagged_windows.clear();
         self.apply_layout()?;
+
+        // Focus the last moved window
+        if let Some(window) = last_moved {
+            self.suppress_enter_focus = true;
+            self.focus_window(window)?;
+        }
+
         log::info!("Moved {} tagged windows to focused frame", count);
         Ok(())
     }
@@ -2284,11 +2296,14 @@ impl Wm {
 
             Event::EnterNotify(e) => {
                 self.tracer.trace_x11_event("EnterNotify", Some(e.event), "");
-                // Focus follows mouse
-                if self.workspaces.current().layout.find_window(e.event).is_some() {
-                    log::debug!("EnterNotify for window 0x{:x}", e.event);
-                    self.focus_window(e.event)?;
+                // Focus follows mouse (unless suppressed after explicit focus)
+                if !self.suppress_enter_focus {
+                    if self.workspaces.current().layout.find_window(e.event).is_some() {
+                        log::debug!("EnterNotify for window 0x{:x}", e.event);
+                        self.focus_window(e.event)?;
+                    }
                 }
+                self.suppress_enter_focus = false;
             }
 
             Event::KeyPress(e) => {
@@ -2617,6 +2632,7 @@ impl Wm {
                     }
 
                     self.apply_layout()?;
+                    self.suppress_enter_focus = true;
                     self.focus_window(window)?;
                 } else {
                     log::info!("Drag cancelled - released outside any frame");
@@ -2665,6 +2681,7 @@ impl Wm {
             // Clean up empty frames
             self.workspaces.current_mut().layout.remove_empty_frames();
             self.apply_layout()?;
+            self.suppress_enter_focus = true;
             self.focus_window(window)?;
             log::info!("Moved window 0x{:x} to {} frame", window, if forward { "next" } else { "previous" });
         }
