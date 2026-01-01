@@ -1923,11 +1923,6 @@ impl Wm {
         if let Some(_frame_id) = self.workspaces.current_mut().layout.remove_window(window) {
             log::info!("Unmanaging window 0x{:x}", window);
 
-            // Clean up empty frames
-            if self.workspaces.current_mut().layout.remove_empty_frames() {
-                log::info!("Cleaned up empty frames");
-            }
-
             // Update EWMH client list
             let _ = self.update_client_list();
 
