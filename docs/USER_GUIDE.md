@@ -350,6 +350,14 @@ ttwmctl move-tagged            # Move all tagged to focused frame
 ttwmctl untag-all              # Untag all windows
 ttwmctl tagged                 # List tagged window IDs
 
+# Workspace commands
+ttwmctl workspace 3            # Switch to workspace 3
+ttwmctl workspace next         # Switch to next workspace
+ttwmctl workspace prev         # Switch to previous workspace
+ttwmctl current-workspace      # Get current workspace number
+ttwmctl move-to-workspace 2    # Move focused window to workspace 2
+ttwmctl move-to-workspace 2 --window 0x1c00004  # Move specific window
+
 # Validate WM state (for debugging)
 ttwmctl validate
 
