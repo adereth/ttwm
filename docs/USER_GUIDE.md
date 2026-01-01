@@ -341,6 +341,15 @@ ttwmctl close
 ttwmctl cycle-tab forward
 ttwmctl cycle-tab backward
 
+# Tagging commands
+ttwmctl tag                    # Tag focused window
+ttwmctl tag 0x1c00004          # Tag specific window
+ttwmctl untag                  # Untag focused window
+ttwmctl toggle-tag             # Toggle tag on focused window
+ttwmctl move-tagged            # Move all tagged to focused frame
+ttwmctl untag-all              # Untag all windows
+ttwmctl tagged                 # List tagged window IDs
+
 # Validate WM state (for debugging)
 ttwmctl validate
 

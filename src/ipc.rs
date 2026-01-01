@@ -62,6 +62,20 @@ pub enum IpcCommand {
     /// Cycle tabs in focused frame
     CycleTab { forward: bool },
 
+    // Tagging
+    /// Tag a window (uses focused window if not specified)
+    TagWindow { window: Option<u32> },
+    /// Untag a window (uses focused window if not specified)
+    UntagWindow { window: Option<u32> },
+    /// Toggle tag on a window (uses focused window if not specified)
+    ToggleTag { window: Option<u32> },
+    /// Move all tagged windows to the focused frame and untag them
+    MoveTagged,
+    /// Untag all windows
+    UntagAll,
+    /// Get list of tagged window IDs
+    GetTagged,
+
     // Debug
     /// Capture screenshot to file
     Screenshot { path: String },
@@ -94,6 +108,8 @@ pub enum IpcResponse {
     EventLog { entries: Vec<EventLogEntry> },
     /// Screenshot saved
     Screenshot { path: String },
+    /// List of tagged window IDs
+    Tagged { windows: Vec<u32> },
     /// Error response
     Error { code: String, message: String },
 }
@@ -164,6 +180,7 @@ pub struct WindowInfo {
     pub tab_index: usize,
     pub is_focused: bool,
     pub is_visible: bool,
+    pub is_tagged: bool,
 }
 
 /// Entry in the event log

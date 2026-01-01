@@ -2931,6 +2931,90 @@ impl Wm {
                     },
                 }
             }
+            IpcCommand::TagWindow { window } => {
+                let target = window.or(self.focused_window);
+                if let Some(w) = target {
+                    self.tagged_windows.insert(w);
+                    log::info!("Tagged window 0x{:x} via IPC", w);
+                    if self.apply_layout().is_err() {
+                        return IpcResponse::Error {
+                            code: "layout_failed".to_string(),
+                            message: "Failed to apply layout".to_string(),
+                        };
+                    }
+                    IpcResponse::Ok
+                } else {
+                    IpcResponse::Error {
+                        code: "no_window".to_string(),
+                        message: "No window specified and no focused window".to_string(),
+                    }
+                }
+            }
+            IpcCommand::UntagWindow { window } => {
+                let target = window.or(self.focused_window);
+                if let Some(w) = target {
+                    self.tagged_windows.remove(&w);
+                    log::info!("Untagged window 0x{:x} via IPC", w);
+                    if self.apply_layout().is_err() {
+                        return IpcResponse::Error {
+                            code: "layout_failed".to_string(),
+                            message: "Failed to apply layout".to_string(),
+                        };
+                    }
+                    IpcResponse::Ok
+                } else {
+                    IpcResponse::Error {
+                        code: "no_window".to_string(),
+                        message: "No window specified and no focused window".to_string(),
+                    }
+                }
+            }
+            IpcCommand::ToggleTag { window } => {
+                let target = window.or(self.focused_window);
+                if let Some(w) = target {
+                    if self.tagged_windows.contains(&w) {
+                        self.tagged_windows.remove(&w);
+                        log::info!("Untagged window 0x{:x} via IPC", w);
+                    } else {
+                        self.tagged_windows.insert(w);
+                        log::info!("Tagged window 0x{:x} via IPC", w);
+                    }
+                    if self.apply_layout().is_err() {
+                        return IpcResponse::Error {
+                            code: "layout_failed".to_string(),
+                            message: "Failed to apply layout".to_string(),
+                        };
+                    }
+                    IpcResponse::Ok
+                } else {
+                    IpcResponse::Error {
+                        code: "no_window".to_string(),
+                        message: "No window specified and no focused window".to_string(),
+                    }
+                }
+            }
+            IpcCommand::MoveTagged => {
+                match self.move_tagged_to_focused_frame() {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "move_tagged_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::UntagAll => {
+                match self.untag_all_windows() {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "untag_all_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::GetTagged => {
+                let tagged: Vec<u32> = self.tagged_windows.iter().copied().collect();
+                IpcResponse::Tagged { windows: tagged }
+            }
             IpcCommand::Screenshot { path } => {
                 match self.capture_screenshot(&path) {
                     Ok(()) => IpcResponse::Screenshot { path },
@@ -2991,6 +3075,7 @@ impl Wm {
                         tab_index,
                         is_focused: is_focused_frame && is_focused_tab && self.focused_window == Some(window),
                         is_visible: is_focused_tab, // Only the focused tab is visible
+                        is_tagged: self.tagged_windows.contains(&window),
                     });
                 }
             }
