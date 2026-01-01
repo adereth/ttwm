@@ -28,6 +28,8 @@ tab_focused_bg = "#5294e2"
 tab_unfocused_bg = "#3a3a3a"
 # Visible tab in unfocused frame
 tab_visible_unfocused_bg = "#4a6a9a"
+# Tagged window tab background
+tab_tagged_bg = "#e06c75"
 tab_text = "#ffffff"
 # Text color for background tabs
 tab_text_unfocused = "#888888"
@@ -85,3 +87,8 @@ quit = "Mod4+Shift+q"
 # Workspace navigation (9 virtual desktops)
 workspace_next = "Mod4+]"
 workspace_prev = "Mod4+["
+
+# Tagging (batch window operations)
+tag_window = "Mod4+t"
+move_tagged_windows = "Mod4+a"
+untag_all = "Mod4+Shift+t"

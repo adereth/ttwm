@@ -90,6 +90,8 @@ struct LayoutConfig {
     tab_unfocused_bg: u32,
     /// Visible tab in unfocused frame color
     tab_visible_unfocused_bg: u32,
+    /// Tagged tab background color
+    tab_tagged_bg: u32,
     /// Tab bar text color
     tab_text_color: u32,
     /// Tab bar text color for background tabs
@@ -115,6 +117,7 @@ impl Default for LayoutConfig {
             tab_focused_bg: 0x5294e2,   // Blue (matching border)
             tab_unfocused_bg: 0x3a3a3a, // Darker gray
             tab_visible_unfocused_bg: 0x4a6a9a, // Muted blue
+            tab_tagged_bg: 0xe06c75,    // Soft red
             tab_text_color: 0xffffff,   // White
             tab_text_unfocused: 0x888888, // Dim gray
             tab_separator: 0x4a4a4a,    // Subtle separator
@@ -530,6 +533,8 @@ struct Wm {
     screen_depth: u8,
     /// Icon cache for tab icons (window -> cached icon, None = no icon available)
     icon_cache: HashMap<Window, Option<CachedIcon>>,
+    /// Windows that are currently tagged for batch operations
+    tagged_windows: std::collections::HashSet<Window>,
 }
 
 impl Wm {
@@ -605,6 +610,7 @@ impl Wm {
             tab_focused_bg: parse_color(&user_config.colors.tab_focused_bg).unwrap_or(0x5294e2),
             tab_unfocused_bg: parse_color(&user_config.colors.tab_unfocused_bg).unwrap_or(0x3a3a3a),
             tab_visible_unfocused_bg: parse_color(&user_config.colors.tab_visible_unfocused_bg).unwrap_or(0x4a6a9a),
+            tab_tagged_bg: parse_color(&user_config.colors.tab_tagged_bg).unwrap_or(0xe06c75),
             tab_text_color: parse_color(&user_config.colors.tab_text).unwrap_or(0xffffff),
             tab_text_unfocused: parse_color(&user_config.colors.tab_text_unfocused).unwrap_or(0x888888),
             tab_separator: parse_color(&user_config.colors.tab_separator).unwrap_or(0x4a4a4a),
@@ -666,6 +672,7 @@ impl Wm {
             cursor_resize_v,
             screen_depth,
             icon_cache: HashMap::new(),
+            tagged_windows: std::collections::HashSet::new(),
         })
     }
 
@@ -828,6 +835,54 @@ impl Wm {
     fn workspace_prev(&mut self) -> Result<()> {
         let old_idx = self.workspaces.prev();
         self.perform_workspace_switch(old_idx)?;
+        Ok(())
+    }
+
+    /// Toggle tag on the focused window
+    fn tag_focused_window(&mut self) -> Result<()> {
+        if let Some(window) = self.focused_window {
+            if self.tagged_windows.contains(&window) {
+                self.tagged_windows.remove(&window);
+                log::info!("Untagged window 0x{:x}", window);
+            } else {
+                self.tagged_windows.insert(window);
+                log::info!("Tagged window 0x{:x}", window);
+            }
+            self.apply_layout()?;
+        }
+        Ok(())
+    }
+
+    /// Move all tagged windows to the currently focused frame and untag them
+    fn move_tagged_to_focused_frame(&mut self) -> Result<()> {
+        let target_frame = self.workspaces.current().layout.focused;
+        let tagged: Vec<Window> = self.tagged_windows.iter().copied().collect();
+        let count = tagged.len();
+
+        for window in tagged {
+            if let Some(source_frame) = self.workspaces.current_mut().layout.find_window(window) {
+                if source_frame != target_frame {
+                    self.workspaces.current_mut().layout.move_window_to_frame(
+                        window,
+                        source_frame,
+                        target_frame,
+                    );
+                }
+            }
+        }
+
+        self.tagged_windows.clear();
+        self.apply_layout()?;
+        log::info!("Moved {} tagged windows to focused frame", count);
+        Ok(())
+    }
+
+    /// Untag all windows without moving them
+    fn untag_all_windows(&mut self) -> Result<()> {
+        let count = self.tagged_windows.len();
+        self.tagged_windows.clear();
+        self.apply_layout()?;
+        log::info!("Untagged {} windows", count);
         Ok(())
     }
 
@@ -1172,8 +1227,10 @@ impl Wm {
             let is_focused = i == focused_tab;
             let is_last = i == num_tabs - 1;
 
-            // Tab background color (3 states: focused frame visible, unfocused frame visible, background)
-            let bg_color = if is_focused {
+            // Tab background color (4 states: tagged, focused frame visible, unfocused frame visible, background)
+            let bg_color = if self.tagged_windows.contains(&client_window) {
+                self.config.tab_tagged_bg
+            } else if is_focused {
                 if is_focused_frame {
                     self.config.tab_focused_bg
                 } else {
@@ -1851,6 +1908,9 @@ impl Wm {
 
         // Remove from hidden set if present
         self.hidden_windows.remove(&window);
+
+        // Remove from tagged set if present
+        self.tagged_windows.remove(&window);
 
         // Trace before removing
         if self.workspaces.current().layout.find_window(window).is_some() {
@@ -2677,6 +2737,9 @@ impl Wm {
             WmAction::FocusTab(n) => self.focus_tab(n)?,
             WmAction::WorkspaceNext => self.workspace_next()?,
             WmAction::WorkspacePrev => self.workspace_prev()?,
+            WmAction::TagWindow => self.tag_focused_window()?,
+            WmAction::MoveTaggedToFrame => self.move_tagged_to_focused_frame()?,
+            WmAction::UntagAll => self.untag_all_windows()?,
         }
         Ok(())
     }

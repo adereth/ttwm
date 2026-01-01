@@ -158,6 +158,14 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 | `Mod4+]` | Switch to next workspace |
 | `Mod4+[` | Switch to previous workspace |
 
+### Tagging (Batch Operations)
+
+| Shortcut | Action |
+|----------|--------|
+| `Mod4+t` | Toggle tag on focused window |
+| `Mod4+a` | Move all tagged windows to focused frame |
+| `Mod4+Shift+t` | Untag all windows |
+
 ---
 
 ## Mouse Interactions
@@ -233,6 +241,9 @@ tab_unfocused_bg = "#3a3a3a"
 # Visible tab in an unfocused frame
 tab_visible_unfocused_bg = "#4a6a9a"
 
+# Tagged window tab background
+tab_tagged_bg = "#e06c75"
+
 # Text color for focused tabs
 tab_text = "#ffffff"
 
@@ -275,6 +286,7 @@ All available keybinding options:
 - `split_horizontal`, `split_vertical`
 - `close_window`, `quit`
 - `workspace_next`, `workspace_prev`
+- `tag_window`, `move_tagged_windows`, `untag_all`
 
 ---
 
