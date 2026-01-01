@@ -24,6 +24,15 @@ pub enum SplitDirection {
     Vertical,
 }
 
+/// Direction for spatial navigation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// A rectangle representing geometry
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
@@ -36,6 +45,16 @@ pub struct Rect {
 impl Rect {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self { x, y, width, height }
+    }
+
+    /// Center X coordinate
+    pub fn center_x(&self) -> i32 {
+        self.x + (self.width as i32) / 2
+    }
+
+    /// Center Y coordinate
+    pub fn center_y(&self) -> i32 {
+        self.y + (self.height as i32) / 2
     }
 }
 
@@ -287,25 +306,73 @@ impl LayoutTree {
         }
     }
 
-    /// Focus the next frame in the given direction
-    pub fn focus_direction(&mut self, _direction: SplitDirection, forward: bool) -> bool {
-        let frames = self.all_frames();
-        if frames.len() <= 1 {
-            return false;
+    /// Find the closest frame in the given direction from the focused frame
+    pub fn find_frame_in_direction(
+        &self,
+        direction: Direction,
+        geometries: &[(NodeId, Rect)],
+    ) -> Option<NodeId> {
+        // Get focused frame's geometry
+        let focused_rect = geometries.iter()
+            .find(|(id, _)| *id == self.focused)
+            .map(|(_, rect)| rect)?;
+
+        let focused_cx = focused_rect.center_x();
+        let focused_cy = focused_rect.center_y();
+
+        // Filter frames in the given direction and find the closest one
+        let mut best: Option<(NodeId, i32)> = None;
+
+        for (frame_id, rect) in geometries {
+            if *frame_id == self.focused {
+                continue;
+            }
+
+            let cx = rect.center_x();
+            let cy = rect.center_y();
+
+            // Check if frame is in the right direction
+            let in_direction = match direction {
+                Direction::Left => cx < focused_cx,
+                Direction::Right => cx > focused_cx,
+                Direction::Up => cy < focused_cy,
+                Direction::Down => cy > focused_cy,
+            };
+
+            if !in_direction {
+                continue;
+            }
+
+            // Calculate distance, prioritizing same-axis alignment
+            // For left/right: prefer frames at similar Y positions
+            // For up/down: prefer frames at similar X positions
+            let (primary_dist, secondary_dist) = match direction {
+                Direction::Left | Direction::Right => {
+                    ((focused_cx - cx).abs(), (focused_cy - cy).abs())
+                }
+                Direction::Up | Direction::Down => {
+                    ((focused_cy - cy).abs(), (focused_cx - cx).abs())
+                }
+            };
+
+            // Weighted distance: secondary distance matters less
+            let distance = primary_dist + secondary_dist / 2;
+
+            if best.is_none() || distance < best.unwrap().1 {
+                best = Some((*frame_id, distance));
+            }
         }
 
-        let current_idx = frames.iter().position(|&f| f == self.focused).unwrap_or(0);
+        best.map(|(id, _)| id)
+    }
 
-        // For now, simple linear navigation
-        // TODO: Implement proper spatial navigation
-        let next_idx = if forward {
-            (current_idx + 1) % frames.len()
-        } else {
-            if current_idx == 0 { frames.len() - 1 } else { current_idx - 1 }
-        };
-
-        self.focused = frames[next_idx];
-        true
+    /// Focus the frame in the given spatial direction
+    pub fn focus_spatial(&mut self, direction: Direction, geometries: &[(NodeId, Rect)]) -> bool {
+        if let Some(target) = self.find_frame_in_direction(direction, geometries) {
+            self.focused = target;
+            return true;
+        }
+        false
     }
 
     /// Calculate geometries for all frames
@@ -940,6 +1007,100 @@ mod tests {
         assert_eq!(geometries[1].1.x, expected_x);
     }
 
+    // ==================== Spatial Navigation Tests ====================
+
+    #[test]
+    fn test_spatial_focus_left() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+        // Now focused on right frame
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+        let right_frame = tree.focused;
+
+        // Focus left should move to left frame
+        assert!(tree.focus_spatial(Direction::Left, &geometries));
+        assert_ne!(tree.focused, right_frame);
+    }
+
+    #[test]
+    fn test_spatial_focus_right() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        // Focus left first
+        tree.focus_spatial(Direction::Left, &geometries);
+        let left_frame = tree.focused;
+
+        // Focus right should move to right frame
+        assert!(tree.focus_spatial(Direction::Right, &geometries));
+        assert_ne!(tree.focused, left_frame);
+    }
+
+    #[test]
+    fn test_spatial_focus_up() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Vertical);
+        // Now focused on bottom frame
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+        let bottom_frame = tree.focused;
+
+        // Focus up should move to top frame
+        assert!(tree.focus_spatial(Direction::Up, &geometries));
+        assert_ne!(tree.focused, bottom_frame);
+    }
+
+    #[test]
+    fn test_spatial_focus_down() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Vertical);
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        // Focus up first
+        tree.focus_spatial(Direction::Up, &geometries);
+        let top_frame = tree.focused;
+
+        // Focus down should move to bottom frame
+        assert!(tree.focus_spatial(Direction::Down, &geometries));
+        assert_ne!(tree.focused, top_frame);
+    }
+
+    #[test]
+    fn test_spatial_focus_no_frame_in_direction() {
+        let mut tree = LayoutTree::new();
+        tree.split_focused(SplitDirection::Horizontal);
+
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        // Focus left (to leftmost frame)
+        tree.focus_spatial(Direction::Left, &geometries);
+
+        // Focus left again should fail (no frame to the left)
+        assert!(!tree.focus_spatial(Direction::Left, &geometries));
+    }
+
+    #[test]
+    fn test_spatial_focus_single_frame() {
+        let tree = LayoutTree::new();
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+
+        // With single frame, can't focus in any direction
+        assert!(tree.find_frame_in_direction(Direction::Left, &geometries).is_none());
+        assert!(tree.find_frame_in_direction(Direction::Right, &geometries).is_none());
+        assert!(tree.find_frame_in_direction(Direction::Up, &geometries).is_none());
+        assert!(tree.find_frame_in_direction(Direction::Down, &geometries).is_none());
+    }
+
     // ==================== Frame/Window Tests ====================
 
     #[test]
@@ -1143,8 +1304,10 @@ mod tests {
         tree.add_window(1001);
         tree.split_focused(SplitDirection::Horizontal);
 
-        // Focus back to first frame
-        tree.focus_direction(SplitDirection::Horizontal, false);
+        // Focus back to first frame using spatial navigation
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+        tree.focus_spatial(Direction::Left, &geometries);
 
         // Move window forward
         let moved = tree.move_window_to_adjacent(true);
@@ -1171,8 +1334,10 @@ mod tests {
         let mut tree = LayoutTree::new();
         tree.split_focused(SplitDirection::Horizontal);
 
-        // Focus first frame
-        tree.focus_direction(SplitDirection::Horizontal, false);
+        // Focus first frame using spatial navigation
+        let screen = Rect::new(0, 0, 1000, 500);
+        let geometries = tree.calculate_geometries(screen, 0);
+        tree.focus_spatial(Direction::Left, &geometries);
 
         let original_ratio = tree.get(tree.root).unwrap().as_split().unwrap().ratio;
 

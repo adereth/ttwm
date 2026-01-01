@@ -49,8 +49,8 @@ pub enum IpcCommand {
     FocusWindow { window: u32 },
     /// Focus a specific tab by index (1-based)
     FocusTab { index: usize },
-    /// Focus adjacent frame
-    FocusFrame { forward: bool },
+    /// Focus frame in direction (left, right, up, down)
+    FocusFrame { direction: String },
     /// Split the focused frame
     Split { direction: String },
     /// Move window to adjacent frame

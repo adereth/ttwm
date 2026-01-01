@@ -62,6 +62,8 @@ pub struct KeybindingConfig {
     pub focus_prev: Option<String>,
     pub focus_frame_left: Option<String>,
     pub focus_frame_right: Option<String>,
+    pub focus_frame_up: Option<String>,
+    pub focus_frame_down: Option<String>,
     pub move_window_left: Option<String>,
     pub move_window_right: Option<String>,
     pub resize_shrink: Option<String>,
@@ -98,6 +100,8 @@ pub enum WmAction {
     FocusPrev,
     FocusFrameLeft,
     FocusFrameRight,
+    FocusFrameUp,
+    FocusFrameDown,
     MoveWindowLeft,
     MoveWindowRight,
     ResizeShrink,
@@ -165,6 +169,8 @@ impl Config {
         insert(WmAction::FocusPrev, &self.keybindings.focus_prev);
         insert(WmAction::FocusFrameLeft, &self.keybindings.focus_frame_left);
         insert(WmAction::FocusFrameRight, &self.keybindings.focus_frame_right);
+        insert(WmAction::FocusFrameUp, &self.keybindings.focus_frame_up);
+        insert(WmAction::FocusFrameDown, &self.keybindings.focus_frame_down);
         insert(WmAction::MoveWindowLeft, &self.keybindings.move_window_left);
         insert(WmAction::MoveWindowRight, &self.keybindings.move_window_right);
         insert(WmAction::ResizeShrink, &self.keybindings.resize_shrink);
@@ -333,6 +339,8 @@ impl Default for KeybindingConfig {
             focus_prev: Some("Mod4+k".to_string()),
             focus_frame_left: Some("Mod4+Left".to_string()),
             focus_frame_right: Some("Mod4+Right".to_string()),
+            focus_frame_up: Some("Mod4+Up".to_string()),
+            focus_frame_down: Some("Mod4+Down".to_string()),
             move_window_left: Some("Mod4+Shift+Left".to_string()),
             move_window_right: Some("Mod4+Shift+Right".to_string()),
             resize_shrink: Some("Mod4+Control+Left".to_string()),

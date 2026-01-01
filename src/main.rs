@@ -24,7 +24,7 @@ use x11rb::wrapper::ConnectionExt as _;
 
 use config::{parse_color, Config, ParsedBinding, WmAction};
 use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
-use layout::{LayoutTree, NodeId, Rect, SplitDirection};
+use layout::{Direction, LayoutTree, NodeId, Rect, SplitDirection};
 use state::{StateTransition, UnmanageReason};
 use tracing::EventTracer;
 
@@ -1484,10 +1484,13 @@ impl Wm {
         Ok(())
     }
 
-    /// Focus the next/previous frame
-    fn focus_frame(&mut self, forward: bool) -> Result<()> {
+    /// Focus frame in the given spatial direction
+    fn focus_frame(&mut self, direction: Direction) -> Result<()> {
         let old_focused_frame = self.layout.focused;
-        if self.layout.focus_direction(SplitDirection::Horizontal, forward) {
+        let screen_rect = self.usable_screen();
+        let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
+
+        if self.layout.focus_spatial(direction, &geometries) {
             let new_focused_frame = self.layout.focused;
 
             // Focus the window in the new frame
@@ -1499,8 +1502,6 @@ impl Wm {
 
             // Redraw tab bars for old and new focused frames
             if old_focused_frame != new_focused_frame {
-                let screen_rect = self.usable_screen();
-                let geometries = self.layout.calculate_geometries(screen_rect, self.config.gap);
                 let geometry_map: std::collections::HashMap<_, _> = geometries.into_iter().collect();
 
                 if let Some(&tab_window) = self.tab_bar_windows.get(&old_focused_frame) {
@@ -2070,8 +2071,10 @@ impl Wm {
             WmAction::CycleTabBackward => self.cycle_tab(false)?,
             WmAction::FocusNext => self.cycle_focus(true)?,
             WmAction::FocusPrev => self.cycle_focus(false)?,
-            WmAction::FocusFrameLeft => self.focus_frame(false)?,
-            WmAction::FocusFrameRight => self.focus_frame(true)?,
+            WmAction::FocusFrameLeft => self.focus_frame(Direction::Left)?,
+            WmAction::FocusFrameRight => self.focus_frame(Direction::Right)?,
+            WmAction::FocusFrameUp => self.focus_frame(Direction::Up)?,
+            WmAction::FocusFrameDown => self.focus_frame(Direction::Down)?,
             WmAction::MoveWindowLeft => self.move_window(false)?,
             WmAction::MoveWindowRight => self.move_window(true)?,
             WmAction::ResizeShrink => self.resize_split(false)?,
@@ -2199,8 +2202,20 @@ impl Wm {
                     },
                 }
             }
-            IpcCommand::FocusFrame { forward } => {
-                match self.focus_frame(forward) {
+            IpcCommand::FocusFrame { direction } => {
+                let dir = match direction.to_lowercase().as_str() {
+                    "left" | "l" => Direction::Left,
+                    "right" | "r" => Direction::Right,
+                    "up" | "u" => Direction::Up,
+                    "down" | "d" => Direction::Down,
+                    _ => {
+                        return IpcResponse::Error {
+                            code: "invalid_direction".to_string(),
+                            message: format!("Unknown direction: {}. Use left, right, up, or down.", direction),
+                        };
+                    }
+                };
+                match self.focus_frame(dir) {
                     Ok(()) => IpcResponse::Ok,
                     Err(e) => IpcResponse::Error {
                         code: "focus_frame_failed".to_string(),

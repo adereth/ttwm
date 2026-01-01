@@ -13,7 +13,7 @@ outer_gap = 8
 # Window border width (pixels)
 border_width = 2
 # Tab bar height (pixels)
-tab_bar_height = 32
+tab_bar_height = 26
 # Tab bar font (fontconfig name, e.g., "monospace", "DejaVu Sans Mono", "JetBrains Mono")
 tab_font = "FreeSans"
 # Tab bar font size in points
@@ -58,9 +58,11 @@ focus_tab_9 = "Mod4+9"
 focus_next = "Mod4+j"
 focus_prev = "Mod4+k"
 
-# Frame navigation
+# Frame navigation (spatial)
 focus_frame_left = "Mod4+Left"
 focus_frame_right = "Mod4+Right"
+focus_frame_up = "Mod4+Up"
+focus_frame_down = "Mod4+Down"
 
 # Move windows between frames
 move_window_left = "Mod4+Shift+Left"
