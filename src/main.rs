@@ -1606,15 +1606,60 @@ impl Wm {
         Ok(())
     }
 
+    /// Check if a window supports the WM_DELETE_WINDOW protocol
+    fn supports_delete_protocol(&self, window: Window) -> bool {
+        // Get WM_PROTOCOLS property
+        if let Ok(cookie) = self.conn.get_property(
+            false,
+            window,
+            self.atoms.wm_protocols,
+            AtomEnum::ATOM,
+            0,
+            32,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                if let Some(atoms) = reply.value32() {
+                    return atoms.into_iter().any(|a| a == self.atoms.wm_delete_window);
+                }
+            }
+        }
+        false
+    }
+
+    /// Send WM_DELETE_WINDOW client message to request graceful close
+    fn send_delete_window(&self, window: Window) -> Result<()> {
+        let data = ClientMessageData::from([self.atoms.wm_delete_window, 0u32, 0u32, 0u32, 0u32]);
+        let event = ClientMessageEvent {
+            response_type: CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window,
+            type_: self.atoms.wm_protocols,
+            data,
+        };
+        self.conn.send_event(
+            false,
+            window,
+            EventMask::NO_EVENT,
+            event,
+        )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     /// Close the focused window gracefully
     fn close_focused_window(&self) -> Result<()> {
         if let Some(window) = self.focused_window {
             log::info!("Closing window 0x{:x}", window);
 
-            // Try to use WM_DELETE_WINDOW protocol first
-            // For now, just destroy the window
-            self.conn.kill_client(window)?;
-            self.conn.flush()?;
+            if self.supports_delete_protocol(window) {
+                log::debug!("Using WM_DELETE_WINDOW protocol");
+                self.send_delete_window(window)?;
+            } else {
+                log::debug!("Window doesn't support WM_DELETE_WINDOW, killing client");
+                self.conn.kill_client(window)?;
+                self.conn.flush()?;
+            }
         }
         Ok(())
     }
