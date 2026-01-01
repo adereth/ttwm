@@ -2341,6 +2341,15 @@ impl Wm {
                 // Tab drags don't need motion processing - drop target determined at release
             }
 
+            Event::MappingNotify(e) => {
+                self.tracer.trace_x11_event("MappingNotify", None, &format!("request={:?}", e.request));
+                // Re-grab keys when keyboard mapping changes (Modifier or Keyboard, not Pointer)
+                if e.request != Mapping::POINTER {
+                    log::info!("Keyboard mapping changed, re-grabbing keys");
+                    self.grab_keys()?;
+                }
+            }
+
             _ => {
                 // Ignore other events for now
             }
