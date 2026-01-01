@@ -129,6 +129,33 @@ enum Commands {
         direction: String,
     },
 
+    /// Tag a window (uses focused window if not specified)
+    Tag {
+        /// Window ID (decimal or hex with 0x prefix)
+        window: Option<String>,
+    },
+
+    /// Untag a window (uses focused window if not specified)
+    Untag {
+        /// Window ID (decimal or hex with 0x prefix)
+        window: Option<String>,
+    },
+
+    /// Toggle tag on a window (uses focused window if not specified)
+    ToggleTag {
+        /// Window ID (decimal or hex with 0x prefix)
+        window: Option<String>,
+    },
+
+    /// Move all tagged windows to the focused frame
+    MoveTagged,
+
+    /// Untag all windows
+    UntagAll,
+
+    /// Get list of tagged window IDs
+    Tagged,
+
     /// Capture a screenshot
     Screenshot {
         /// Path to save the screenshot
@@ -181,6 +208,21 @@ fn main() {
             let forward = direction.to_lowercase() != "prev";
             serde_json::json!({"command": "cycle_tab", "forward": forward})
         }
+        Commands::Tag { window } => {
+            let window_id = window.as_ref().map(|w| parse_window_id(w));
+            serde_json::json!({"command": "tag_window", "window": window_id})
+        }
+        Commands::Untag { window } => {
+            let window_id = window.as_ref().map(|w| parse_window_id(w));
+            serde_json::json!({"command": "untag_window", "window": window_id})
+        }
+        Commands::ToggleTag { window } => {
+            let window_id = window.as_ref().map(|w| parse_window_id(w));
+            serde_json::json!({"command": "toggle_tag", "window": window_id})
+        }
+        Commands::MoveTagged => serde_json::json!({"command": "move_tagged"}),
+        Commands::UntagAll => serde_json::json!({"command": "untag_all"}),
+        Commands::Tagged => serde_json::json!({"command": "get_tagged"}),
         Commands::Screenshot { path } => {
             serde_json::json!({"command": "screenshot", "path": path.to_string_lossy()})
         }
