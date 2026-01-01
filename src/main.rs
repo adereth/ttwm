@@ -44,6 +44,8 @@ struct Atoms {
     net_number_of_desktops: Atom,
     net_desktop_names: Atom,
     net_wm_desktop: Atom,
+    // Icon atom
+    net_wm_icon: Atom,
 }
 
 impl Atoms {
@@ -61,6 +63,7 @@ impl Atoms {
             net_number_of_desktops: Self::intern(conn, b"_NET_NUMBER_OF_DESKTOPS")?,
             net_desktop_names: Self::intern(conn, b"_NET_DESKTOP_NAMES")?,
             net_wm_desktop: Self::intern(conn, b"_NET_WM_DESKTOP")?,
+            net_wm_icon: Self::intern(conn, b"_NET_WM_ICON")?,
         })
     }
 
@@ -97,6 +100,8 @@ struct LayoutConfig {
     border_focused: u32,
     /// Border color for unfocused window
     border_unfocused: u32,
+    /// Show application icons in tabs
+    show_tab_icons: bool,
 }
 
 impl Default for LayoutConfig {
@@ -115,8 +120,15 @@ impl Default for LayoutConfig {
             tab_separator: 0x4a4a4a,    // Subtle separator
             border_focused: 0x5294e2,   // Blue
             border_unfocused: 0x3a3a3a, // Gray
+            show_tab_icons: true,
         }
     }
+}
+
+/// Cached window icon (20x20 BGRA pixels)
+struct CachedIcon {
+    /// BGRA pixel data (20 * 20 * 4 = 1600 bytes)
+    pixels: Vec<u8>,
 }
 
 /// Font renderer using FreeType for anti-aliased text
@@ -516,6 +528,8 @@ struct Wm {
     cursor_resize_v: Cursor,
     /// Screen depth (for put_image)
     screen_depth: u8,
+    /// Icon cache for tab icons (window -> cached icon, None = no icon available)
+    icon_cache: HashMap<Window, Option<CachedIcon>>,
 }
 
 impl Wm {
@@ -596,6 +610,7 @@ impl Wm {
             tab_separator: parse_color(&user_config.colors.tab_separator).unwrap_or(0x4a4a4a),
             border_focused: parse_color(&user_config.colors.border_focused).unwrap_or(0x5294e2),
             border_unfocused: parse_color(&user_config.colors.border_unfocused).unwrap_or(0x3a3a3a),
+            show_tab_icons: user_config.appearance.show_tab_icons,
         };
 
         // Create resize cursors from the cursor font
@@ -650,6 +665,7 @@ impl Wm {
             cursor_resize_h,
             cursor_resize_v,
             screen_depth,
+            icon_cache: HashMap::new(),
         })
     }
 
@@ -953,10 +969,19 @@ impl Wm {
         const MIN_TAB_WIDTH: u32 = 80;
         const MAX_TAB_WIDTH: u32 = 200;
         const H_PADDING: u32 = 24;  // Total horizontal padding (12px each side)
+        const ICON_SIZE: u32 = 20;
+        const ICON_PADDING: u32 = 4;  // Padding after icon
 
         let frame = match self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
             Some(f) => f,
             None => return Vec::new(),
+        };
+
+        // Extra width for icon when enabled
+        let icon_width = if self.config.show_tab_icons {
+            ICON_SIZE + ICON_PADDING
+        } else {
+            0
         };
 
         let mut result = Vec::new();
@@ -965,7 +990,7 @@ impl Wm {
         for &client_window in &frame.windows {
             let title = self.get_window_title(client_window);
             let title_width = self.font_renderer.measure_text(&title);
-            let tab_width = (title_width + H_PADDING).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
+            let tab_width = (title_width + H_PADDING + icon_width).clamp(MIN_TAB_WIDTH + icon_width, MAX_TAB_WIDTH + icon_width);
 
             result.push((x_offset, tab_width));
             x_offset += tab_width as i16;
@@ -1062,7 +1087,7 @@ impl Wm {
     }
 
     /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
-    fn draw_tab_bar(&self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
+    fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
         let frame = match self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
             Some(f) => f,
             None => return Ok(()),
@@ -1072,6 +1097,8 @@ impl Wm {
         let height = self.config.tab_bar_height;
         let h_padding: i16 = 12;    // Horizontal text padding
         let corner_radius: u32 = 6; // Rounded corner radius
+        let icon_size: u32 = 20;    // Icon size in pixels
+        let icon_padding: i16 = 4;  // Padding after icon
 
         // Always clear first with solid color to ensure old content is erased
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
@@ -1134,10 +1161,15 @@ impl Wm {
         // Check if this frame is the focused frame
         let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
 
+        // Collect windows and focused index before the loop (to avoid borrow issues)
+        let windows: Vec<Window> = frame.windows.clone();
+        let focused_tab = frame.focused;
+        let show_icons = self.config.show_tab_icons;
+
         // Draw each tab
-        for (i, &client_window) in frame.windows.iter().enumerate() {
+        for (i, &client_window) in windows.iter().enumerate() {
             let (x, tab_width) = tab_layout[i];
-            let is_focused = i == frame.focused;
+            let is_focused = i == focused_tab;
             let is_last = i == num_tabs - 1;
 
             // Tab background color (3 states: focused frame visible, unfocused frame visible, background)
@@ -1177,9 +1209,41 @@ impl Wm {
                 )?;
             }
 
+            // Calculate content offset (shifts right if icon is present)
+            let mut content_offset: i16 = 0;
+
+            // Draw icon if enabled
+            if show_icons {
+                if let Some(icon) = self.get_window_icon(client_window) {
+                    // Blend icon with tab background and render
+                    let blended = Self::blend_icon_with_background(&icon.pixels, bg_color, icon_size);
+
+                    let icon_x = x + h_padding;
+                    let icon_y = ((height - icon_size) / 2) as i16;
+
+                    self.conn.put_image(
+                        ImageFormat::Z_PIXMAP,
+                        window,
+                        self.gc,
+                        icon_size as u16,
+                        icon_size as u16,
+                        icon_x,
+                        icon_y,
+                        0,
+                        24, // 24-bit depth
+                        &blended,
+                    )?;
+
+                    content_offset = icon_size as i16 + icon_padding;
+                } else {
+                    // No icon available, but still reserve space for consistency
+                    content_offset = icon_size as i16 + icon_padding;
+                }
+            }
+
             // Get window title and truncate if needed
             let title = self.get_window_title(client_window);
-            let available_width = (tab_width as i32 - h_padding as i32 * 2).max(0) as u32;
+            let available_width = (tab_width as i32 - h_padding as i32 * 2 - content_offset as i32).max(0) as u32;
             let display_title = self.truncate_text_to_width(&title, available_width);
 
             // Text color (dimmer for background tabs)
@@ -1197,8 +1261,8 @@ impl Wm {
             );
 
             if !pixels.is_empty() && text_width > 0 && text_height > 0 {
-                // Calculate text position (vertically centered)
-                let text_x = x + h_padding;
+                // Calculate text position (vertically centered, after icon)
+                let text_x = x + h_padding + content_offset;
                 let text_y = ((height - text_height) / 2) as i16;
 
                 // Draw text using put_image
@@ -1298,6 +1362,170 @@ impl Wm {
 
         // Default title
         format!("0x{:x}", window)
+    }
+
+    /// Get window icon from _NET_WM_ICON property, scaled to 20x20 BGRA
+    fn get_window_icon(&mut self, window: Window) -> Option<&CachedIcon> {
+        const ICON_SIZE: u32 = 20;
+
+        // Check cache first
+        if self.icon_cache.contains_key(&window) {
+            return self.icon_cache.get(&window).and_then(|o| o.as_ref());
+        }
+
+        // Try to fetch _NET_WM_ICON
+        let icon = self.fetch_and_process_icon(window, ICON_SIZE);
+        self.icon_cache.insert(window, icon);
+        self.icon_cache.get(&window).and_then(|o| o.as_ref())
+    }
+
+    /// Fetch _NET_WM_ICON and process it into a 20x20 BGRA image
+    fn fetch_and_process_icon(&self, window: Window, target_size: u32) -> Option<CachedIcon> {
+        // Request a large amount to get all icon sizes
+        let reply = self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_icon,
+            AtomEnum::CARDINAL,
+            0,
+            u32::MAX / 4, // Max reasonable size
+        ).ok()?.reply().ok()?;
+
+        if reply.value.is_empty() || reply.format != 32 {
+            return None;
+        }
+
+        // Parse as 32-bit values (format depends on byte order)
+        let data: Vec<u32> = reply.value32()?.collect();
+        if data.len() < 3 {
+            return None;
+        }
+
+        // Find the best icon size (closest to target_size x target_size)
+        let mut best_icon: Option<(u32, u32, &[u32])> = None;
+        let mut best_diff = u32::MAX;
+        let mut idx = 0;
+
+        while idx + 2 < data.len() {
+            let width = data[idx];
+            let height = data[idx + 1];
+            let pixel_count = (width as usize).saturating_mul(height as usize);
+
+            if width == 0 || height == 0 || idx + 2 + pixel_count > data.len() {
+                break;
+            }
+
+            let pixels = &data[idx + 2..idx + 2 + pixel_count];
+
+            // Prefer larger icons (better quality when scaling down)
+            let size = width.max(height);
+            let diff = if size >= target_size {
+                size - target_size
+            } else {
+                (target_size - size) * 2 // Penalize upscaling
+            };
+
+            if diff < best_diff || (diff == best_diff && width >= target_size) {
+                best_diff = diff;
+                best_icon = Some((width, height, pixels));
+            }
+
+            idx += 2 + pixel_count;
+        }
+
+        let (src_w, src_h, pixels) = best_icon?;
+
+        // Scale to target size using nearest-neighbor
+        let scaled = Self::scale_icon(pixels, src_w, src_h, target_size);
+
+        Some(CachedIcon { pixels: scaled })
+    }
+
+    /// Scale ARGB32 icon to target size and convert to BGRA
+    fn scale_icon(src: &[u32], src_w: u32, src_h: u32, dst_size: u32) -> Vec<u8> {
+        let mut dst = vec![0u8; (dst_size * dst_size * 4) as usize];
+
+        for y in 0..dst_size {
+            for x in 0..dst_size {
+                let src_x = (x * src_w / dst_size).min(src_w - 1) as usize;
+                let src_y = (y * src_h / dst_size).min(src_h - 1) as usize;
+                let src_idx = src_y * src_w as usize + src_x;
+
+                if src_idx < src.len() {
+                    let pixel = src[src_idx];
+                    // _NET_WM_ICON format: 0xAARRGGBB
+                    let a = ((pixel >> 24) & 0xFF) as u8;
+                    let r = ((pixel >> 16) & 0xFF) as u8;
+                    let g = ((pixel >> 8) & 0xFF) as u8;
+                    let b = (pixel & 0xFF) as u8;
+
+                    // X11 expects BGRA (or BGRX for 24-bit)
+                    let dst_idx = ((y * dst_size + x) * 4) as usize;
+                    dst[dst_idx] = b;
+                    dst[dst_idx + 1] = g;
+                    dst[dst_idx + 2] = r;
+                    dst[dst_idx + 3] = a;
+                }
+            }
+        }
+
+        dst
+    }
+
+    /// Redraw tab bars that contain a specific window (used when icon changes)
+    fn redraw_tabs_for_window(&mut self, window: Window) -> Result<()> {
+        let ws_idx = self.workspaces.current_index();
+
+        // Find the frame containing this window
+        if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
+            // Get tab bar window for this frame
+            if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, frame_id)) {
+                // Get frame geometry
+                let screen_rect = self.usable_screen();
+                let geometries = self.workspaces.current().layout.calculate_geometries(
+                    screen_rect,
+                    self.config.gap,
+                );
+
+                if let Some(rect) = geometries.iter().find(|(fid, _)| *fid == frame_id).map(|(_, r)| r.clone()) {
+                    self.draw_tab_bar(frame_id, tab_window, &rect)?;
+                    self.conn.flush()?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Blend BGRA icon pixels with a solid background color, returning BGR (24-bit) data
+    fn blend_icon_with_background(icon_bgra: &[u8], bg_color: u32, size: u32) -> Vec<u8> {
+        let bg_r = ((bg_color >> 16) & 0xFF) as f32;
+        let bg_g = ((bg_color >> 8) & 0xFF) as f32;
+        let bg_b = (bg_color & 0xFF) as f32;
+
+        let pixel_count = (size * size) as usize;
+        let mut result = vec![0u8; pixel_count * 4]; // 32-bit for put_image
+
+        for i in 0..pixel_count {
+            let src_idx = i * 4;
+            let dst_idx = i * 4;
+
+            if src_idx + 3 < icon_bgra.len() {
+                let b = icon_bgra[src_idx] as f32;
+                let g = icon_bgra[src_idx + 1] as f32;
+                let r = icon_bgra[src_idx + 2] as f32;
+                let a = icon_bgra[src_idx + 3] as f32 / 255.0;
+                let inv_a = 1.0 - a;
+
+                // Alpha blend with background
+                result[dst_idx] = (b * a + bg_b * inv_a) as u8;
+                result[dst_idx + 1] = (g * a + bg_g * inv_a) as u8;
+                result[dst_idx + 2] = (r * a + bg_r * inv_a) as u8;
+                result[dst_idx + 3] = 0; // Padding byte
+            }
+        }
+
+        result
     }
 
     /// Remove tab bar windows for frames that no longer exist
@@ -1517,7 +1745,7 @@ impl Wm {
         self.conn.change_window_attributes(
             window,
             &ChangeWindowAttributesAux::new()
-                .event_mask(EventMask::ENTER_WINDOW | EventMask::FOCUS_CHANGE),
+                .event_mask(EventMask::ENTER_WINDOW | EventMask::FOCUS_CHANGE | EventMask::PROPERTY_CHANGE),
         )?;
 
         // Map the window (make it visible)
@@ -1957,6 +2185,15 @@ impl Wm {
                 self.handle_expose(e)?;
             }
 
+            Event::PropertyNotify(e) => {
+                // Invalidate icon cache if _NET_WM_ICON changed
+                if e.atom == self.atoms.net_wm_icon {
+                    self.icon_cache.remove(&e.window);
+                    // Redraw tab bars that might show this window
+                    self.redraw_tabs_for_window(e.window)?;
+                }
+            }
+
             Event::ButtonPress(e) => {
                 self.tracer.trace_x11_event("ButtonPress", Some(e.event), &format!("button={}", e.detail));
                 // Handle clicks on tab bars
@@ -1996,7 +2233,7 @@ impl Wm {
     }
 
     /// Handle expose event (redraw tab bar)
-    fn handle_expose(&self, event: ExposeEvent) -> Result<()> {
+    fn handle_expose(&mut self, event: ExposeEvent) -> Result<()> {
         let ws_idx = self.workspaces.current_index();
         // Find which frame this tab bar belongs to
         for (&(idx, frame_id), &tab_window) in &self.tab_bar_windows {

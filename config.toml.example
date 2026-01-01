@@ -18,6 +18,8 @@ tab_bar_height = 26
 tab_font = "Segoe UI"
 # Tab bar font size in points
 tab_font_size = 12
+# Show application icons in tabs
+show_tab_icons = true
 
 [colors]
 # Colors in hex format (#RRGGBB)

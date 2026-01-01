@@ -34,6 +34,7 @@ pub struct AppearanceConfig {
     pub tab_bar_height: u32,
     pub tab_font: String,
     pub tab_font_size: u32,
+    pub show_tab_icons: bool,
 }
 
 /// Color settings (hex strings like "#5294e2")
@@ -318,6 +319,7 @@ impl Default for AppearanceConfig {
             tab_bar_height: 28,
             tab_font: "monospace".to_string(),
             tab_font_size: 11,
+            show_tab_icons: true,
         }
     }
 }

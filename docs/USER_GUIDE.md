@@ -210,6 +210,9 @@ tab_font = "Segoe UI"
 
 # Tab bar font size in points
 tab_font_size = 12
+
+# Show application icons in tabs (20x20 pixels)
+show_tab_icons = true
 ```
 
 ### Color Settings
