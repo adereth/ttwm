@@ -3163,6 +3163,60 @@ impl Wm {
                 let tagged: Vec<u32> = self.tagged_windows.iter().copied().collect();
                 IpcResponse::Tagged { windows: tagged }
             }
+            IpcCommand::SwitchWorkspace { index } => {
+                if let Some(old_idx) = self.workspaces.switch_to(index) {
+                    match self.perform_workspace_switch(old_idx) {
+                        Ok(()) => IpcResponse::Ok,
+                        Err(e) => IpcResponse::Error {
+                            code: "workspace_switch_failed".to_string(),
+                            message: e.to_string(),
+                        },
+                    }
+                } else {
+                    IpcResponse::Ok // Already on that workspace or invalid
+                }
+            }
+            IpcCommand::WorkspaceNext => {
+                match self.workspace_next() {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "workspace_next_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::WorkspacePrev => {
+                match self.workspace_prev() {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "workspace_prev_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::GetCurrentWorkspace => {
+                IpcResponse::Workspace {
+                    index: self.workspaces.current_index(),
+                    total: 9,
+                }
+            }
+            IpcCommand::MoveToWorkspace { window, workspace } => {
+                let target_window = window.or(self.focused_window);
+                if let Some(w) = target_window {
+                    match self.move_window_to_workspace(w, workspace) {
+                        Ok(()) => IpcResponse::Ok,
+                        Err(e) => IpcResponse::Error {
+                            code: "move_to_workspace_failed".to_string(),
+                            message: e.to_string(),
+                        },
+                    }
+                } else {
+                    IpcResponse::Error {
+                        code: "no_window".to_string(),
+                        message: "No window specified and no focused window".to_string(),
+                    }
+                }
+            }
             IpcCommand::Screenshot { path } => {
                 match self.capture_screenshot(&path) {
                     Ok(()) => IpcResponse::Screenshot { path },

@@ -76,6 +76,18 @@ pub enum IpcCommand {
     /// Get list of tagged window IDs
     GetTagged,
 
+    // Workspaces
+    /// Switch to a specific workspace (0-8)
+    SwitchWorkspace { index: usize },
+    /// Switch to next workspace
+    WorkspaceNext,
+    /// Switch to previous workspace
+    WorkspacePrev,
+    /// Get current workspace index
+    GetCurrentWorkspace,
+    /// Move a window to a specific workspace
+    MoveToWorkspace { window: Option<u32>, workspace: usize },
+
     // Debug
     /// Capture screenshot to file
     Screenshot { path: String },
@@ -110,6 +122,8 @@ pub enum IpcResponse {
     Screenshot { path: String },
     /// List of tagged window IDs
     Tagged { windows: Vec<u32> },
+    /// Current workspace info
+    Workspace { index: usize, total: usize },
     /// Error response
     Error { code: String, message: String },
 }

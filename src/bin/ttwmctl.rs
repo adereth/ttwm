@@ -156,6 +156,24 @@ enum Commands {
     /// Get list of tagged window IDs
     Tagged,
 
+    /// Switch to a workspace (1-9) or next/prev
+    Workspace {
+        /// Workspace number (1-9) or "next" or "prev"
+        target: String,
+    },
+
+    /// Get current workspace number
+    CurrentWorkspace,
+
+    /// Move focused window to a workspace (1-9)
+    MoveToWorkspace {
+        /// Workspace number (1-9)
+        workspace: usize,
+        /// Window ID (uses focused if not specified)
+        #[arg(long)]
+        window: Option<String>,
+    },
+
     /// Capture a screenshot
     Screenshot {
         /// Path to save the screenshot
@@ -223,6 +241,38 @@ fn main() {
         Commands::MoveTagged => serde_json::json!({"command": "move_tagged"}),
         Commands::UntagAll => serde_json::json!({"command": "untag_all"}),
         Commands::Tagged => serde_json::json!({"command": "get_tagged"}),
+        Commands::Workspace { target } => {
+            let lower = target.to_lowercase();
+            if lower == "next" {
+                serde_json::json!({"command": "workspace_next"})
+            } else if lower == "prev" {
+                serde_json::json!({"command": "workspace_prev"})
+            } else {
+                // Parse as 1-based workspace number
+                let num: usize = target.parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid workspace: {}. Use 1-9 or next/prev", target);
+                    std::process::exit(1);
+                });
+                if num < 1 || num > 9 {
+                    eprintln!("Workspace must be 1-9, got {}", num);
+                    std::process::exit(1);
+                }
+                serde_json::json!({"command": "switch_workspace", "index": num - 1})
+            }
+        }
+        Commands::CurrentWorkspace => serde_json::json!({"command": "get_current_workspace"}),
+        Commands::MoveToWorkspace { workspace, window } => {
+            if *workspace < 1 || *workspace > 9 {
+                eprintln!("Workspace must be 1-9, got {}", workspace);
+                std::process::exit(1);
+            }
+            let window_id = window.as_ref().map(|w| parse_window_id(w));
+            serde_json::json!({
+                "command": "move_to_workspace",
+                "workspace": workspace - 1,
+                "window": window_id
+            })
+        }
         Commands::Screenshot { path } => {
             serde_json::json!({"command": "screenshot", "path": path.to_string_lossy()})
         }
