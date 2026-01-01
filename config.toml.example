@@ -79,3 +79,7 @@ split_vertical = "Mod4+v"
 # Window management
 close_window = "Mod4+q"
 quit = "Mod4+Shift+q"
+
+# Workspace navigation (9 virtual desktops)
+workspace_next = "Mod4+]"
+workspace_prev = "Mod4+["

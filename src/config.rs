@@ -81,6 +81,8 @@ pub struct KeybindingConfig {
     pub focus_tab_7: Option<String>,
     pub focus_tab_8: Option<String>,
     pub focus_tab_9: Option<String>,
+    pub workspace_next: Option<String>,
+    pub workspace_prev: Option<String>,
 }
 
 /// Parsed keybinding (ready for X11 grab)
@@ -111,6 +113,8 @@ pub enum WmAction {
     CloseWindow,
     Quit,
     FocusTab(usize),
+    WorkspaceNext,
+    WorkspacePrev,
 }
 
 impl Config {
@@ -188,6 +192,8 @@ impl Config {
         insert(WmAction::FocusTab(7), &self.keybindings.focus_tab_7);
         insert(WmAction::FocusTab(8), &self.keybindings.focus_tab_8);
         insert(WmAction::FocusTab(9), &self.keybindings.focus_tab_9);
+        insert(WmAction::WorkspaceNext, &self.keybindings.workspace_next);
+        insert(WmAction::WorkspacePrev, &self.keybindings.workspace_prev);
 
         bindings
     }
@@ -279,6 +285,9 @@ fn key_to_keysym(key: &str) -> Option<u32> {
         "down" => Some(0xff54),
         "home" => Some(0xff50),
         "end" => Some(0xff57),
+        // Bracket keys
+        "[" | "bracketleft" => Some(0x5b),
+        "]" | "bracketright" => Some(0x5d),
         _ => {
             log::warn!("Unknown key: {}", key);
             None
@@ -358,6 +367,8 @@ impl Default for KeybindingConfig {
             focus_tab_7: Some("Mod4+7".to_string()),
             focus_tab_8: Some("Mod4+8".to_string()),
             focus_tab_9: Some("Mod4+9".to_string()),
+            workspace_next: Some("Mod4+]".to_string()),
+            workspace_prev: Some("Mod4+[".to_string()),
         }
     }
 }

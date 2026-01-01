@@ -840,6 +840,29 @@ impl LayoutTree {
     }
 }
 
+/// A workspace (virtual desktop) containing an independent layout tree
+#[derive(Debug)]
+pub struct Workspace {
+    /// Unique identifier (1-9)
+    pub id: usize,
+    /// The layout tree for this workspace
+    pub layout: LayoutTree,
+    /// The last focused window in this workspace (for focus restoration)
+    pub last_focused_window: Option<Window>,
+}
+
+impl Workspace {
+    /// Create a new workspace with the given id
+    pub fn new(id: usize) -> Self {
+        let layout = LayoutTree::new();
+        Self {
+            id,
+            layout,
+            last_focused_window: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
