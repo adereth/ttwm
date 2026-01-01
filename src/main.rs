@@ -46,6 +46,8 @@ struct Atoms {
     net_wm_desktop: Atom,
     // Icon atom
     net_wm_icon: Atom,
+    // Close window request
+    net_close_window: Atom,
 }
 
 impl Atoms {
@@ -64,6 +66,7 @@ impl Atoms {
             net_desktop_names: Self::intern(conn, b"_NET_DESKTOP_NAMES")?,
             net_wm_desktop: Self::intern(conn, b"_NET_WM_DESKTOP")?,
             net_wm_icon: Self::intern(conn, b"_NET_WM_ICON")?,
+            net_close_window: Self::intern(conn, b"_NET_CLOSE_WINDOW")?,
         })
     }
 
@@ -720,6 +723,7 @@ impl Wm {
             self.atoms.net_supported,
             self.atoms.net_client_list,
             self.atoms.net_active_window,
+            self.atoms.net_close_window,
             self.atoms.net_wm_name,
             self.atoms.net_supporting_wm_check,
             self.atoms.net_current_desktop,
@@ -2238,6 +2242,125 @@ impl Wm {
         Ok(())
     }
 
+    /// Handle EWMH ClientMessage events
+    fn handle_client_message(&mut self, event: ClientMessageEvent) -> Result<()> {
+        let msg_type = event.type_;
+        self.tracer.trace_x11_event("ClientMessage", Some(event.window), &format!("type={}", msg_type));
+
+        if msg_type == self.atoms.net_active_window {
+            // _NET_ACTIVE_WINDOW: Focus the window
+            let window = event.window;
+            log::info!("ClientMessage: _NET_ACTIVE_WINDOW for 0x{:x}", window);
+
+            // Check if window is on current workspace
+            if self.workspaces.current().layout.find_window(window).is_some() {
+                self.suppress_enter_focus = true;
+                self.focus_window(window)?;
+            } else {
+                // Check other workspaces and switch if found
+                for (idx, ws) in self.workspaces.workspaces.iter().enumerate() {
+                    if ws.layout.find_window(window).is_some() {
+                        // Switch to that workspace, then focus
+                        if let Some(old_idx) = self.workspaces.switch_to(idx) {
+                            self.perform_workspace_switch(old_idx)?;
+                            self.suppress_enter_focus = true;
+                            self.focus_window(window)?;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else if msg_type == self.atoms.net_close_window {
+            // _NET_CLOSE_WINDOW: Close the window
+            let window = event.window;
+            log::info!("ClientMessage: _NET_CLOSE_WINDOW for 0x{:x}", window);
+
+            if self.supports_delete_protocol(window) {
+                self.send_delete_window(window)?;
+            } else {
+                self.conn.kill_client(window)?;
+                self.conn.flush()?;
+            }
+        } else if msg_type == self.atoms.net_current_desktop {
+            // _NET_CURRENT_DESKTOP: Switch to workspace
+            let desktop = event.data.as_data32()[0] as usize;
+            log::info!("ClientMessage: _NET_CURRENT_DESKTOP to {}", desktop);
+
+            if let Some(old_idx) = self.workspaces.switch_to(desktop) {
+                self.perform_workspace_switch(old_idx)?;
+            }
+        } else if msg_type == self.atoms.net_wm_desktop {
+            // _NET_WM_DESKTOP: Move window to workspace
+            let window = event.window;
+            let desktop = event.data.as_data32()[0] as usize;
+            log::info!("ClientMessage: _NET_WM_DESKTOP move 0x{:x} to {}", window, desktop);
+
+            self.move_window_to_workspace(window, desktop)?;
+        }
+
+        Ok(())
+    }
+
+    /// Move a window to a different workspace
+    fn move_window_to_workspace(&mut self, window: Window, target: usize) -> Result<()> {
+        if target >= 9 {
+            return Ok(());
+        }
+
+        let current_ws = self.workspaces.current_index();
+
+        // Find which workspace has this window
+        let source_ws = self.workspaces.workspaces.iter()
+            .enumerate()
+            .find(|(_, ws)| ws.layout.find_window(window).is_some())
+            .map(|(idx, _)| idx);
+
+        let Some(source_ws) = source_ws else {
+            return Ok(()); // Window not found
+        };
+
+        if source_ws == target {
+            return Ok(()); // Already on target workspace
+        }
+
+        // Remove from source workspace
+        self.workspaces.workspaces[source_ws].layout.remove_window(window);
+        self.workspaces.workspaces[source_ws].layout.remove_empty_frames();
+
+        // Add to target workspace
+        self.workspaces.workspaces[target].layout.add_window(window);
+
+        // Update window's _NET_WM_DESKTOP property
+        self.set_window_desktop(window, target)?;
+
+        // If moving from current workspace, hide the window
+        if source_ws == current_ws {
+            self.hidden_windows.insert(window);
+            self.conn.unmap_window(window)?;
+
+            // If this was the focused window, focus something else
+            if self.focused_window == Some(window) {
+                self.focused_window = None;
+                if let Some(frame) = self.workspaces.current().layout.focused_frame() {
+                    if let Some(w) = frame.focused_window() {
+                        self.focus_window(w)?;
+                    }
+                }
+            }
+        }
+
+        // If moving to current workspace, show and map the window
+        if target == current_ws {
+            self.hidden_windows.remove(&window);
+        }
+
+        self.apply_layout()?;
+        self.update_client_list()?;
+
+        log::info!("Moved window 0x{:x} from workspace {} to {}", window, source_ws + 1, target + 1);
+        Ok(())
+    }
+
     /// Spawn a terminal
     fn spawn_terminal(&self) {
         let terminal = &self.user_config.general.terminal;
@@ -2354,6 +2477,10 @@ impl Wm {
                     }
                 }
                 // Tab drags don't need motion processing - drop target determined at release
+            }
+
+            Event::ClientMessage(e) => {
+                self.handle_client_message(e)?;
             }
 
             Event::MappingNotify(e) => {
