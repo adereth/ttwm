@@ -85,7 +85,7 @@ cp config.toml.example ~/.config/ttwm/config.toml
 ## Quick Start
 
 1. **Start ttwm** and you'll see an empty screen
-2. **Open a terminal**: Press `Mod4+x` (Super+x) to spawn your configured terminal
+2. **Open a terminal**: Press `Mod4+x` (Super+x) to spawn alacritty (configurable via `[exec]` section)
 3. **Split the screen**: Press `Mod4+s` for horizontal split or `Mod4+v` for vertical split
 4. **Open another terminal**: The new window appears in the newly focused frame
 5. **Navigate between frames**: Use `Mod4+Left/Right/Up/Down` to move focus
@@ -98,11 +98,17 @@ cp config.toml.example ~/.config/ttwm/config.toml
 
 All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifier. These can be customized in your config file.
 
-### Terminal and Control
+### Exec Bindings (default)
 
 | Shortcut | Action |
 |----------|--------|
-| `Mod4+x` | Spawn terminal |
+| `Mod4+x` | Spawn alacritty |
+| `Mod4+r` | Run gmrun |
+
+### Window Control
+
+| Shortcut | Action |
+|----------|--------|
 | `Mod4+q` | Close focused window |
 | `Mod4+Shift+q` | Quit ttwm |
 
@@ -189,14 +195,6 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 
 ttwm is configured through a TOML file located at `~/.config/ttwm/config.toml`.
 
-### General Settings
-
-```toml
-[general]
-# Terminal emulator to spawn with Mod4+x
-terminal = "alacritty"
-```
-
 ### Appearance Settings
 
 ```toml
@@ -269,14 +267,12 @@ Available modifiers: `Mod4` (Super), `Shift`, `Control`, `Alt`
 ```toml
 [keybindings]
 # Examples
-spawn_terminal = "Mod4+Return"     # Change to Mod4+Return
 close_window = "Mod4+Shift+c"      # Change to Mod4+Shift+c
 split_horizontal = "Mod4+h"        # Change to Mod4+h
 split_vertical = "Mod4+v"          # Keep as Mod4+v
 ```
 
 All available keybinding options:
-- `spawn_terminal`
 - `cycle_tab_forward`, `cycle_tab_backward`
 - `focus_tab_1` through `focus_tab_9`
 - `focus_next`, `focus_prev`
@@ -287,6 +283,20 @@ All available keybinding options:
 - `close_window`, `quit`
 - `workspace_next`, `workspace_prev`
 - `tag_window`, `move_tagged_windows`, `untag_all`
+
+### Exec Settings
+
+Run programs with keybindings using the `[exec]` section. Format: `"Modifier+Key" = "command [args...]"`
+
+```toml
+[exec]
+# Run alacritty terminal with Mod4+x
+"Mod4+x" = "alacritty"
+# Run gmrun launcher with Mod4+r
+"Mod4+r" = "gmrun"
+# Run htop in alacritty with Mod4+Shift+x
+"Mod4+Shift+x" = "alacritty -e htop"
+```
 
 ---
 

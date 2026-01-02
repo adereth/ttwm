@@ -15,13 +15,22 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     pub colors: ColorConfig,
     pub keybindings: KeybindingConfig,
+    pub exec: ExecConfig,
+}
+
+/// Exec keybindings (key combo -> command to run)
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ExecConfig {
+    #[serde(flatten)]
+    pub bindings: HashMap<String, String>,
 }
 
 /// General settings
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct GeneralConfig {
-    pub terminal: String,
+    // Reserved for future general settings
 }
 
 /// Appearance settings (gaps, borders, etc.)
@@ -57,7 +66,6 @@ pub struct ColorConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct KeybindingConfig {
-    pub spawn_terminal: Option<String>,
     pub cycle_tab_forward: Option<String>,
     pub cycle_tab_backward: Option<String>,
     pub focus_next: Option<String>,
@@ -98,9 +106,9 @@ pub struct ParsedBinding {
 }
 
 /// Window manager action
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WmAction {
-    SpawnTerminal,
+    Spawn(String),
     CycleTabForward,
     CycleTabBackward,
     FocusNext,
@@ -174,7 +182,6 @@ impl Config {
             }
         };
 
-        insert(WmAction::SpawnTerminal, &self.keybindings.spawn_terminal);
         insert(WmAction::CycleTabForward, &self.keybindings.cycle_tab_forward);
         insert(WmAction::CycleTabBackward, &self.keybindings.cycle_tab_backward);
         insert(WmAction::FocusNext, &self.keybindings.focus_next);
@@ -205,6 +212,15 @@ impl Config {
         insert(WmAction::TagWindow, &self.keybindings.tag_window);
         insert(WmAction::MoveTaggedToFrame, &self.keybindings.move_tagged_windows);
         insert(WmAction::UntagAll, &self.keybindings.untag_all);
+
+        // Parse exec bindings (key combo -> command)
+        for (key_combo, command) in &self.exec.bindings {
+            if let Some(parsed) = parse_key_binding(key_combo) {
+                bindings.insert(WmAction::Spawn(command.clone()), parsed);
+            } else {
+                log::warn!("Failed to parse exec keybinding: {}", key_combo);
+            }
+        }
 
         bindings
     }
@@ -312,11 +328,12 @@ pub fn parse_color(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
-impl Default for GeneralConfig {
+impl Default for ExecConfig {
     fn default() -> Self {
-        Self {
-            terminal: "alacritty".to_string(),
-        }
+        let mut bindings = HashMap::new();
+        bindings.insert("Mod4+x".to_string(), "alacritty".to_string());
+        bindings.insert("Mod4+r".to_string(), "gmrun".to_string());
+        Self { bindings }
     }
 }
 
@@ -354,7 +371,6 @@ impl Default for ColorConfig {
 impl Default for KeybindingConfig {
     fn default() -> Self {
         Self {
-            spawn_terminal: Some("Mod4+x".to_string()),
             cycle_tab_forward: Some("Mod4+Page_Down".to_string()),
             cycle_tab_backward: Some("Mod4+Page_Up".to_string()),
             focus_next: Some("Mod4+j".to_string()),
@@ -421,7 +437,8 @@ mod tests {
         let config = Config::default();
         let bindings = config.parse_keybindings();
 
-        assert!(bindings.contains_key(&WmAction::SpawnTerminal));
+        assert!(bindings.contains_key(&WmAction::Spawn("alacritty".to_string())));
+        assert!(bindings.contains_key(&WmAction::Spawn("gmrun".to_string())));
         assert!(bindings.contains_key(&WmAction::Quit));
         assert!(bindings.contains_key(&WmAction::FocusTab(1)));
     }

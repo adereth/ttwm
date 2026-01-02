@@ -1,10 +1,6 @@
 # ttwm configuration file
 # Copy to ~/.config/ttwm/config.toml and customize
 
-[general]
-# Terminal emulator to spawn with Mod4+x
-terminal = "alacritty"
-
 [appearance]
 # Gap between windows (pixels)
 gap = 8
@@ -41,9 +37,6 @@ border_unfocused = "#3a3a3a"
 [keybindings]
 # Format: "Modifier+Key" where Modifier is Mod4/Super, Shift, Control, Alt
 # Key names: a-z, 0-9, Return, Tab, Page_Up, Page_Down, Left, Right, Up, Down, etc.
-
-# Terminal
-spawn_terminal = "Mod4+x"
 
 # Tab navigation
 cycle_tab_forward = "Mod4+Page_Down"
@@ -92,3 +85,9 @@ workspace_prev = "Mod4+["
 tag_window = "Mod4+t"
 move_tagged_windows = "Mod4+a"
 untag_all = "Mod4+Shift+t"
+
+[exec]
+# Run programs with keybindings
+# Format: "Modifier+Key" = "command [args...]"
+"Mod4+x" = "alacritty"
+"Mod4+r" = "gmrun"

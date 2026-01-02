@@ -2361,20 +2361,6 @@ impl Wm {
         Ok(())
     }
 
-    /// Spawn a terminal
-    fn spawn_terminal(&self) {
-        let terminal = &self.user_config.general.terminal;
-        log::info!("Spawning terminal: {}", terminal);
-
-        if let Err(e) = Command::new(terminal).spawn() {
-            log::error!("Failed to spawn {}: {}", terminal, e);
-            // Fallback to xterm
-            if let Err(e) = Command::new("xterm").spawn() {
-                log::error!("Failed to spawn xterm: {}", e);
-            }
-        }
-    }
-
     /// Handle an X11 event
     fn handle_event(&mut self, event: Event) -> Result<()> {
         match event {
@@ -2851,7 +2837,7 @@ impl Wm {
         let mut matched_action = None;
         for (action, binding) in &self.keybindings {
             if binding.keysym == keysym && binding.modifiers == clean_state {
-                matched_action = Some(*action);
+                matched_action = Some(action.clone());
                 break;
             }
         }
@@ -2866,7 +2852,17 @@ impl Wm {
     /// Execute a window manager action
     fn execute_action(&mut self, action: WmAction) -> Result<()> {
         match action {
-            WmAction::SpawnTerminal => self.spawn_terminal(),
+            WmAction::Spawn(ref command) => {
+                log::info!("Spawning: {}", command);
+                let parts: Vec<&str> = command.split_whitespace().collect();
+                if let Some((program, args)) = parts.split_first() {
+                    let mut cmd = Command::new(program);
+                    cmd.args(args);
+                    if let Err(e) = cmd.spawn() {
+                        log::error!("Failed to spawn {}: {}", command, e);
+                    }
+                }
+            }
             WmAction::CycleTabForward => self.cycle_tab(true)?,
             WmAction::CycleTabBackward => self.cycle_tab(false)?,
             WmAction::FocusNext => self.cycle_focus(true)?,
