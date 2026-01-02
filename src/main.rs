@@ -11,6 +11,7 @@ mod layout;
 mod render;
 mod state;
 mod tracing;
+mod types;
 mod workspaces;
 
 use std::collections::HashMap;

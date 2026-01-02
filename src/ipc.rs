@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::layout::Rect;
+pub use crate::types::LayoutSnapshot;
 
 /// Get the socket path for this display
 pub fn socket_path() -> PathBuf {
@@ -137,52 +137,6 @@ pub struct WmStateSnapshot {
     pub frame_count: usize,
     pub layout: LayoutSnapshot,
     pub windows: Vec<WindowInfo>,
-}
-
-/// Snapshot of the layout tree
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayoutSnapshot {
-    pub root: NodeSnapshot,
-}
-
-/// Snapshot of a single node in the layout tree
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum NodeSnapshot {
-    Frame {
-        id: String,
-        windows: Vec<u32>,
-        focused_tab: usize,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        geometry: Option<RectSnapshot>,
-    },
-    Split {
-        id: String,
-        direction: String,
-        ratio: f32,
-        first: Box<NodeSnapshot>,
-        second: Box<NodeSnapshot>,
-    },
-}
-
-/// Serializable rectangle
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct RectSnapshot {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl From<Rect> for RectSnapshot {
-    fn from(r: Rect) -> Self {
-        Self {
-            x: r.x,
-            y: r.y,
-            width: r.width,
-            height: r.height,
-        }
-    }
 }
 
 /// Information about a managed window

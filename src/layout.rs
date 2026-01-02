@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
 use x11rb::protocol::xproto::Window;
 
+pub use crate::types::Rect;
+
 // Generate unique key types for our arena
 new_key_type! {
     /// Unique identifier for a node in the layout tree
@@ -31,31 +33,6 @@ pub enum Direction {
     Right,
     Up,
     Down,
-}
-
-/// A rectangle representing geometry
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Rect {
-    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
-    }
-
-    /// Center X coordinate
-    pub fn center_x(&self) -> i32 {
-        self.x + (self.width as i32) / 2
-    }
-
-    /// Center Y coordinate
-    pub fn center_y(&self) -> i32 {
-        self.y + (self.height as i32) / 2
-    }
 }
 
 /// A frame is a leaf node that contains windows
@@ -124,21 +101,21 @@ pub struct Split {
 /// A node in the layout tree
 #[derive(Debug, Clone)]
 pub enum Node {
-    Frame(Frame),
-    Split(Split),
+    Frame { frame: Frame, parent: Option<NodeId> },
+    Split { split: Split, parent: Option<NodeId> },
 }
 
 impl Node {
     pub fn as_frame(&self) -> Option<&Frame> {
         match self {
-            Node::Frame(f) => Some(f),
+            Node::Frame { frame, .. } => Some(frame),
             _ => None,
         }
     }
 
     pub fn as_frame_mut(&mut self) -> Option<&mut Frame> {
         match self {
-            Node::Frame(f) => Some(f),
+            Node::Frame { frame, .. } => Some(frame),
             _ => None,
         }
     }
@@ -146,8 +123,24 @@ impl Node {
     #[allow(dead_code)]
     pub fn as_split(&self) -> Option<&Split> {
         match self {
-            Node::Split(s) => Some(s),
+            Node::Split { split, .. } => Some(split),
             _ => None,
+        }
+    }
+
+    /// Get the parent of this node
+    pub fn parent(&self) -> Option<NodeId> {
+        match self {
+            Node::Frame { parent, .. } => *parent,
+            Node::Split { parent, .. } => *parent,
+        }
+    }
+
+    /// Set the parent of this node
+    pub fn set_parent(&mut self, new_parent: Option<NodeId>) {
+        match self {
+            Node::Frame { parent, .. } => *parent = new_parent,
+            Node::Split { parent, .. } => *parent = new_parent,
         }
     }
 }
@@ -155,10 +148,8 @@ impl Node {
 /// The layout tree manages the tiling structure
 #[derive(Debug)]
 pub struct LayoutTree {
-    /// Arena storage for all nodes
+    /// Arena storage for all nodes (each node contains its own parent pointer)
     nodes: SlotMap<NodeId, Node>,
-    /// Parent pointers for navigation
-    parents: SlotMap<NodeId, Option<NodeId>>,
     /// Root node of the tree
     pub root: NodeId,
     /// Currently focused frame
@@ -169,14 +160,14 @@ impl LayoutTree {
     /// Create a new layout tree with a single empty frame
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
-        let mut parents = SlotMap::with_key();
 
-        let root = nodes.insert(Node::Frame(Frame::new()));
-        parents.insert(None);
+        let root = nodes.insert(Node::Frame {
+            frame: Frame::new(),
+            parent: None,
+        });
 
         Self {
             nodes,
-            parents,
             root,
             focused: root,
         }
@@ -194,7 +185,14 @@ impl LayoutTree {
 
     /// Get parent of a node
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
-        self.parents.get(id).copied().flatten()
+        self.nodes.get(id).and_then(|node| node.parent())
+    }
+
+    /// Set parent of a node
+    fn set_parent(&mut self, id: NodeId, new_parent: Option<NodeId>) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.set_parent(new_parent);
+        }
     }
 
     /// Get the focused frame
@@ -219,7 +217,7 @@ impl LayoutTree {
         // Find and remove from whichever frame contains it
         let mut found_frame = None;
         for (id, node) in &mut self.nodes {
-            if let Node::Frame(frame) = node {
+            if let Node::Frame { frame, .. } = node {
                 if frame.remove_window(window) {
                     found_frame = Some(id);
                     break;
@@ -232,7 +230,7 @@ impl LayoutTree {
     /// Find which frame contains a window
     pub fn find_window(&self, window: Window) -> Option<NodeId> {
         for (id, node) in &self.nodes {
-            if let Node::Frame(frame) = node {
+            if let Node::Frame { frame, .. } = node {
                 if frame.windows.contains(&window) {
                     return Some(id);
                 }
@@ -244,25 +242,29 @@ impl LayoutTree {
     /// Split the focused frame
     pub fn split_focused(&mut self, direction: SplitDirection) -> NodeId {
         let old_focused = self.focused;
+        let old_focused_parent = self.parent(old_focused);
 
-        // Create new empty frame
-        let new_frame_id = self.nodes.insert(Node::Frame(Frame::new()));
-        self.parents.insert(None); // Will be set below
+        // Create new empty frame (parent will be set after split is created)
+        let new_frame_id = self.nodes.insert(Node::Frame {
+            frame: Frame::new(),
+            parent: None, // Will be set below
+        });
 
-        // Create split node
+        // Create split node with the old focused node's parent
         let split = Split {
             direction,
             first: old_focused,
             second: new_frame_id,
             ratio: 0.5,
         };
-        let split_id = self.nodes.insert(Node::Split(split));
-        self.parents.insert(self.parent(old_focused));
+        let split_id = self.nodes.insert(Node::Split {
+            split,
+            parent: old_focused_parent,
+        });
 
-        // Update parent pointers
-        if let Some(parent_id) = self.parent(old_focused) {
-            // Update parent's child reference
-            if let Some(Node::Split(parent_split)) = self.nodes.get_mut(parent_id) {
+        // Update grandparent's child reference to point to split instead of old_focused
+        if let Some(parent_id) = old_focused_parent {
+            if let Some(Node::Split { split: parent_split, .. }) = self.nodes.get_mut(parent_id) {
                 if parent_split.first == old_focused {
                     parent_split.first = split_id;
                 } else {
@@ -275,12 +277,8 @@ impl LayoutTree {
         }
 
         // Set parent of old focused and new frame to the split
-        if let Some(p) = self.parents.get_mut(old_focused) {
-            *p = Some(split_id);
-        }
-        if let Some(p) = self.parents.get_mut(new_frame_id) {
-            *p = Some(split_id);
-        }
+        self.set_parent(old_focused, Some(split_id));
+        self.set_parent(new_frame_id, Some(split_id));
 
         // Focus the new frame
         self.focused = new_frame_id;
@@ -297,8 +295,8 @@ impl LayoutTree {
 
     fn collect_frames(&self, node_id: NodeId, frames: &mut Vec<NodeId>) {
         match self.get(node_id) {
-            Some(Node::Frame(_)) => frames.push(node_id),
-            Some(Node::Split(split)) => {
+            Some(Node::Frame { .. }) => frames.push(node_id),
+            Some(Node::Split { split, .. }) => {
                 self.collect_frames(split.first, frames);
                 self.collect_frames(split.second, frames);
             }
@@ -390,10 +388,10 @@ impl LayoutTree {
         result: &mut Vec<(NodeId, Rect)>,
     ) {
         match self.get(node_id) {
-            Some(Node::Frame(_)) => {
+            Some(Node::Frame { .. }) => {
                 result.push((node_id, available));
             }
-            Some(Node::Split(split)) => {
+            Some(Node::Split { split, .. }) => {
                 let (first_rect, second_rect) = Self::split_rect(
                     available,
                     split.direction,
@@ -452,7 +450,7 @@ impl LayoutTree {
     pub fn all_windows(&self) -> Vec<Window> {
         let mut windows = Vec::new();
         for (_id, node) in &self.nodes {
-            if let Node::Frame(frame) = node {
+            if let Node::Frame { frame, .. } = node {
                 windows.extend(&frame.windows);
             }
         }
@@ -467,7 +465,7 @@ impl LayoutTree {
             None => return false, // No parent split to resize
         };
 
-        if let Some(Node::Split(split)) = self.nodes.get_mut(parent_id) {
+        if let Some(Node::Split { split, .. }) = self.nodes.get_mut(parent_id) {
             // Determine if focused is the first or second child
             let is_first = split.first == self.focused;
 
@@ -483,7 +481,7 @@ impl LayoutTree {
     /// Set the ratio of a specific split node directly
     /// Returns true if the split was found and updated
     pub fn set_split_ratio(&mut self, split_id: NodeId, ratio: f32) -> bool {
-        if let Some(Node::Split(split)) = self.nodes.get_mut(split_id) {
+        if let Some(Node::Split { split, .. }) = self.nodes.get_mut(split_id) {
             split.ratio = ratio.clamp(0.1, 0.9);
             true
         } else {
@@ -512,8 +510,8 @@ impl LayoutTree {
         mouse_y: i32,
     ) -> Option<(NodeId, SplitDirection, i32, u32)> {
         match self.get(node_id) {
-            Some(Node::Frame(_)) => None, // Frames don't have gaps
-            Some(Node::Split(split)) => {
+            Some(Node::Frame { .. }) => None, // Frames don't have gaps
+            Some(Node::Split { split, .. }) => {
                 let (first_rect, second_rect) = Self::split_rect(
                     available,
                     split.direction,
@@ -579,7 +577,7 @@ impl LayoutTree {
             // Find an empty frame that isn't the only node
             let empty_frame = self.nodes.iter()
                 .find(|(id, node)| {
-                    if let Node::Frame(frame) = node {
+                    if let Node::Frame { frame, .. } = node {
                         frame.is_empty() && *id != self.root
                     } else {
                         false
@@ -599,7 +597,7 @@ impl LayoutTree {
             };
 
             // Get the sibling
-            let sibling_id = if let Some(Node::Split(split)) = self.nodes.get(parent_id) {
+            let sibling_id = if let Some(Node::Split { split, .. }) = self.nodes.get(parent_id) {
                 if split.first == frame_id {
                     split.second
                 } else {
@@ -615,7 +613,7 @@ impl LayoutTree {
             // Replace parent split with sibling
             if let Some(gp_id) = grandparent_id {
                 // Update grandparent's child reference
-                if let Some(Node::Split(gp_split)) = self.nodes.get_mut(gp_id) {
+                if let Some(Node::Split { split: gp_split, .. }) = self.nodes.get_mut(gp_id) {
                     if gp_split.first == parent_id {
                         gp_split.first = sibling_id;
                     } else {
@@ -623,22 +621,16 @@ impl LayoutTree {
                     }
                 }
                 // Update sibling's parent
-                if let Some(p) = self.parents.get_mut(sibling_id) {
-                    *p = Some(gp_id);
-                }
+                self.set_parent(sibling_id, Some(gp_id));
             } else {
                 // Parent was root, sibling becomes new root
                 self.root = sibling_id;
-                if let Some(p) = self.parents.get_mut(sibling_id) {
-                    *p = None;
-                }
+                self.set_parent(sibling_id, None);
             }
 
             // Remove the empty frame and the parent split
             self.nodes.remove(frame_id);
-            self.parents.remove(frame_id);
             self.nodes.remove(parent_id);
-            self.parents.remove(parent_id);
 
             // Update focused if needed
             if self.focused == frame_id {
@@ -684,7 +676,7 @@ impl LayoutTree {
 
     /// Reorder a tab within a frame (move from_index to to_index)
     pub fn reorder_tab(&mut self, frame_id: NodeId, from_index: usize, to_index: usize) -> bool {
-        if let Some(Node::Frame(frame)) = self.nodes.get_mut(frame_id) {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(frame_id) {
             if from_index >= frame.windows.len() || to_index >= frame.windows.len() {
                 return false;
             }
@@ -718,7 +710,7 @@ impl LayoutTree {
         target_frame: NodeId,
     ) -> bool {
         // Remove from source
-        if let Some(Node::Frame(frame)) = self.nodes.get_mut(source_frame) {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(source_frame) {
             if !frame.remove_window(window) {
                 return false;
             }
@@ -727,7 +719,7 @@ impl LayoutTree {
         }
 
         // Add to target
-        if let Some(Node::Frame(frame)) = self.nodes.get_mut(target_frame) {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(target_frame) {
             frame.add_window(window);
         } else {
             return false;
@@ -768,12 +760,12 @@ impl LayoutTree {
         let adjacent_frame_id = frames[adjacent_idx];
 
         // Remove window from current frame
-        if let Some(Node::Frame(frame)) = self.nodes.get_mut(self.focused) {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(self.focused) {
             frame.remove_window(window);
         }
 
         // Add window to adjacent frame
-        if let Some(Node::Frame(frame)) = self.nodes.get_mut(adjacent_frame_id) {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(adjacent_frame_id) {
             frame.add_window(window);
         }
 
@@ -785,8 +777,8 @@ impl LayoutTree {
 
     /// Create a snapshot of the layout tree for IPC serialization
     /// The geometries parameter should be pre-calculated if you want geometry info
-    pub fn snapshot(&self, geometries: Option<&[(NodeId, Rect)]>) -> crate::ipc::LayoutSnapshot {
-        use crate::ipc::{LayoutSnapshot, NodeSnapshot, RectSnapshot};
+    pub fn snapshot(&self, geometries: Option<&[(NodeId, Rect)]>) -> crate::types::LayoutSnapshot {
+        use crate::types::{LayoutSnapshot, NodeSnapshot, RectSnapshot};
 
         fn snapshot_node(
             tree: &LayoutTree,
@@ -794,7 +786,7 @@ impl LayoutTree {
             geometries: Option<&[(NodeId, Rect)]>,
         ) -> NodeSnapshot {
             match tree.get(node_id) {
-                Some(Node::Frame(frame)) => {
+                Some(Node::Frame { frame, .. }) => {
                     let geometry = geometries.and_then(|g| {
                         g.iter()
                             .find(|(id, _)| *id == node_id)
@@ -807,7 +799,7 @@ impl LayoutTree {
                         geometry,
                     }
                 }
-                Some(Node::Split(split)) => {
+                Some(Node::Split { split, .. }) => {
                     let direction = match split.direction {
                         SplitDirection::Horizontal => "horizontal",
                         SplitDirection::Vertical => "vertical",
@@ -1517,12 +1509,12 @@ mod tests {
         assert!(tree.move_window_to_frame(1001, source_frame, target_frame));
 
         // Source frame should have only 1002
-        if let Some(Node::Frame(frame)) = tree.get(source_frame) {
+        if let Some(Node::Frame { frame, .. }) = tree.get(source_frame) {
             assert_eq!(frame.windows, vec![1002]);
         }
 
         // Target frame should have 1001
-        if let Some(Node::Frame(frame)) = tree.get(target_frame) {
+        if let Some(Node::Frame { frame, .. }) = tree.get(target_frame) {
             assert!(frame.windows.contains(&1001));
         }
     }
