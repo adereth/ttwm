@@ -3068,9 +3068,36 @@ impl Wm {
             return Ok(());
         }
 
-        // Find which frame's tab bar was clicked
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
+
+        // Check for click on an empty frame window (content area)
+        let clicked_empty_frame = self.empty_frame_windows.iter()
+            .find(|(&(m, idx, _), &empty_window)| m == mon_id && idx == ws_idx && empty_window == event.event)
+            .map(|(&(_, _, frame_id), _)| frame_id);
+
+        if let Some(frame_id) = clicked_empty_frame {
+            if event.detail == 2 {
+                // Middle-click: remove empty frame
+                if let Some(empty_window) = self.empty_frame_windows.remove(&(mon_id, ws_idx, frame_id)) {
+                    self.conn.destroy_window(empty_window)?;
+                }
+                if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
+                    self.conn.destroy_window(tab_window)?;
+                }
+                self.workspaces_mut().current_mut().layout.remove_empty_frames();
+                self.apply_layout()?;
+                log::info!("Removed empty frame via middle-click on content area");
+                return Ok(());
+            } else if event.detail == 1 {
+                // Left-click: focus the empty frame
+                self.workspaces_mut().current_mut().layout.focused = frame_id;
+                self.apply_layout()?;
+                return Ok(());
+            }
+        }
+
+        // Find which frame's tab bar was clicked
         let clicked_frame = self.tab_bar_windows.iter()
             .find(|(&(m, idx, _), &tab_window)| m == mon_id && idx == ws_idx && tab_window == event.event)
             .map(|(&(_, _, frame_id), _)| frame_id);
