@@ -173,6 +173,8 @@ struct Wm {
     config: LayoutConfig,
     /// Tab bar windows for each frame ((monitor_id, workspace_idx, NodeId) -> Window)
     tab_bar_windows: HashMap<(MonitorId, usize, NodeId), Window>,
+    /// Empty frame placeholder windows ((monitor_id, workspace_idx, NodeId) -> Window)
+    empty_frame_windows: HashMap<(MonitorId, usize, NodeId), Window>,
     /// Windows we've intentionally unmapped (hidden tabs) - don't unmanage on UnmapNotify
     hidden_windows: std::collections::HashSet<Window>,
     /// Graphics context for drawing
@@ -345,6 +347,7 @@ impl Wm {
             check_window,
             config,
             tab_bar_windows: HashMap::new(),
+            empty_frame_windows: HashMap::new(),
             hidden_windows: std::collections::HashSet::new(),
             gc,
             running: true,
@@ -766,6 +769,99 @@ impl Wm {
         Ok(window)
     }
 
+    /// Get or create a placeholder window for an empty frame (shows border)
+    fn get_or_create_empty_frame_window(&mut self, frame_id: NodeId, rect: &Rect, is_focused: bool) -> Result<Window> {
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
+        let key = (mon_id, ws_idx, frame_id);
+
+        let border = self.config.border_width;
+        let tab_bar_height = self.config.tab_bar_height;
+        let client_y = rect.y + tab_bar_height as i32;
+        let client_height = rect.height.saturating_sub(tab_bar_height);
+        let border_color = if is_focused {
+            self.config.border_focused
+        } else {
+            self.config.border_unfocused
+        };
+
+        if let Some(&window) = self.empty_frame_windows.get(&key) {
+            // Update position, size, and border color
+            self.conn.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .x(rect.x)
+                    .y(client_y)
+                    .width(rect.width.saturating_sub(border * 2))
+                    .height(client_height.saturating_sub(border * 2))
+                    .border_width(border),
+            )?;
+            self.conn.change_window_attributes(
+                window,
+                &ChangeWindowAttributesAux::new()
+                    .border_pixel(border_color),
+            )?;
+            return Ok(window);
+        }
+
+        // Create new empty frame placeholder window
+        let window = self.conn.generate_id()?;
+        self.conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            self.root,
+            rect.x as i16,
+            client_y as i16,
+            (rect.width.saturating_sub(border * 2)) as u16,
+            (client_height.saturating_sub(border * 2)) as u16,
+            border as u16,
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new()
+                .background_pixel(self.config.tab_bar_bg)
+                .border_pixel(border_color)
+                .event_mask(EventMask::BUTTON_PRESS),
+        )?;
+
+        self.conn.map_window(window)?;
+        self.empty_frame_windows.insert(key, window);
+
+        Ok(window)
+    }
+
+    /// Destroy an empty frame placeholder window if it exists
+    fn destroy_empty_frame_window(&mut self, frame_id: NodeId) {
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
+        let key = (mon_id, ws_idx, frame_id);
+
+        if let Some(window) = self.empty_frame_windows.remove(&key) {
+            if let Err(e) = self.conn.destroy_window(window) {
+                log::error!("Failed to destroy empty frame window: {}", e);
+            }
+        }
+    }
+
+    /// Clean up empty frame windows for removed frames
+    fn cleanup_empty_frame_windows(&mut self) {
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
+        let valid_frames: std::collections::HashSet<_> = self.workspaces().current().layout.all_frames().into_iter().collect();
+        let to_remove: Vec<_> = self.empty_frame_windows
+            .keys()
+            .filter(|(m_id, idx, frame_id)| *m_id == mon_id && *idx == ws_idx && !valid_frames.contains(frame_id))
+            .copied()
+            .collect();
+
+        for key in to_remove {
+            if let Some(window) = self.empty_frame_windows.remove(&key) {
+                if let Err(e) = self.conn.destroy_window(window) {
+                    log::error!("Failed to destroy empty frame window: {}", e);
+                }
+            }
+        }
+    }
+
     /// Calculate tab widths based on window titles (Chrome-style content-based sizing)
     /// Returns a vector of (x_position, width) for each tab
     fn calculate_tab_layout(&self, frame_id: NodeId) -> Vec<(i16, u32)> {
@@ -926,23 +1022,6 @@ impl Wm {
             )?;
         }
 
-        Ok(())
-    }
-
-    /// Draw the focus indicator for an empty frame.
-    fn draw_empty_frame_indicator(&mut self, window: Window, rect: &Rect) -> Result<()> {
-        let accent_height = 3u16;
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_focused_bg))?;
-        self.conn.poly_fill_rectangle(
-            window,
-            self.gc,
-            &[Rectangle {
-                x: 0,
-                y: 0,
-                width: rect.width as u16,
-                height: accent_height,
-            }],
-        )?;
         Ok(())
     }
 
@@ -1134,12 +1213,8 @@ impl Wm {
         // Draw pseudo-transparent background
         self.draw_tab_bar_background(window, rect)?;
 
-        // Empty frame - show focus indicator if focused
+        // Empty frame - nothing to draw in tab bar (border is on the placeholder window)
         if is_empty {
-            let is_focused_frame = frame_id == self.workspaces().current().layout.focused;
-            if is_focused_frame {
-                self.draw_empty_frame_indicator(window, rect)?;
-            }
             return Ok(());
         }
 
@@ -1375,8 +1450,15 @@ impl Wm {
         let screen_rect = self.usable_screen();
         let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
 
+        // Get the focused frame id
+        let focused_frame_id = self.workspaces().current().layout.focused;
+
         // Collect frame info for tab bar management
         let mut frames_with_tabs: Vec<(NodeId, Rect, usize)> = Vec::new();
+        // Track empty frames for placeholder windows
+        let mut empty_frames: Vec<(NodeId, Rect, bool)> = Vec::new();
+        // Track non-empty frames to destroy their placeholder windows
+        let mut non_empty_frames: Vec<NodeId> = Vec::new();
 
         // Collect frame data upfront to avoid borrow conflicts
         struct FrameData {
@@ -1428,6 +1510,14 @@ impl Wm {
                 }
             }
 
+            // Track empty vs non-empty frames for placeholder window management
+            if fd.windows.is_empty() {
+                let is_focused = fd.frame_id == focused_frame_id;
+                empty_frames.push((fd.frame_id, fd.rect.clone(), is_focused));
+            } else {
+                non_empty_frames.push(fd.frame_id);
+            }
+
             // Only show the focused window, unmap others
             for (i, &window) in fd.windows.iter().enumerate() {
                 if i == fd.focused_idx {
@@ -1467,8 +1557,21 @@ impl Wm {
             self.draw_tab_bar(frame_id, tab_window, &rect)?;
         }
 
+        // Create/update empty frame placeholder windows (with borders)
+        for (frame_id, rect, is_focused) in empty_frames {
+            self.get_or_create_empty_frame_window(frame_id, &rect, is_focused)?;
+        }
+
+        // Destroy empty frame windows for non-empty frames
+        for frame_id in non_empty_frames {
+            self.destroy_empty_frame_window(frame_id);
+        }
+
         // Clean up tab bars for removed frames
         self.cleanup_tab_bars();
+
+        // Clean up empty frame windows for removed frames
+        self.cleanup_empty_frame_windows();
 
         // Apply floating window layout
         self.apply_floating_layout()?;
@@ -2173,7 +2276,7 @@ impl Wm {
                 }
             }
 
-            // Redraw tab bars for old and new focused frames
+            // Redraw tab bars and update empty frame borders for old and new focused frames
             if old_focused_frame != new_focused_frame {
                 let geometry_map: std::collections::HashMap<_, _> = geometries.into_iter().collect();
                 let mon_id = self.monitors.focused_id();
@@ -2188,6 +2291,22 @@ impl Wm {
                     if let Some(rect) = geometry_map.get(&new_focused_frame) {
                         self.draw_tab_bar(new_focused_frame, tab_window, rect)?;
                     }
+                }
+
+                // Update empty frame window borders
+                if let Some(&empty_window) = self.empty_frame_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
+                    self.conn.change_window_attributes(
+                        empty_window,
+                        &ChangeWindowAttributesAux::new()
+                            .border_pixel(self.config.border_unfocused),
+                    )?;
+                }
+                if let Some(&empty_window) = self.empty_frame_windows.get(&(mon_id, ws_idx, new_focused_frame)) {
+                    self.conn.change_window_attributes(
+                        empty_window,
+                        &ChangeWindowAttributesAux::new()
+                            .border_pixel(self.config.border_focused),
+                    )?;
                 }
 
                 self.conn.flush()?;
