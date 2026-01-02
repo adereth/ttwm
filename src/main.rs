@@ -2987,8 +2987,8 @@ impl Wm {
                     if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
                         self.conn.destroy_window(tab_window)?;
                     }
-                    // Remove empty frame from layout
-                    self.workspaces_mut().current_mut().layout.remove_empty_frames();
+                    // Remove this specific empty frame from layout
+                    self.workspaces_mut().current_mut().layout.remove_frame_by_id(frame_id);
                     self.apply_layout()?;
                     log::info!("Removed empty frame via middle-click");
                 }
@@ -3085,7 +3085,7 @@ impl Wm {
                 if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
                     self.conn.destroy_window(tab_window)?;
                 }
-                self.workspaces_mut().current_mut().layout.remove_empty_frames();
+                self.workspaces_mut().current_mut().layout.remove_frame_by_id(frame_id);
                 self.apply_layout()?;
                 log::info!("Removed empty frame via middle-click on content area");
                 return Ok(());

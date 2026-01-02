@@ -644,6 +644,70 @@ impl LayoutTree {
         changed
     }
 
+    /// Remove a specific empty frame by ID
+    /// Returns true if the frame was removed
+    pub fn remove_frame_by_id(&mut self, frame_id: NodeId) -> bool {
+        // Check if frame exists and is empty
+        let is_empty = self.get(frame_id)
+            .and_then(|n| n.as_frame())
+            .map(|f| f.is_empty())
+            .unwrap_or(false);
+
+        if !is_empty || frame_id == self.root {
+            return false;
+        }
+
+        // Get the parent split
+        let parent_id = match self.parent(frame_id) {
+            Some(id) => id,
+            None => return false,
+        };
+
+        // Get the sibling
+        let sibling_id = if let Some(Node::Split { split, .. }) = self.nodes.get(parent_id) {
+            if split.first == frame_id {
+                split.second
+            } else {
+                split.first
+            }
+        } else {
+            return false;
+        };
+
+        // Get grandparent
+        let grandparent_id = self.parent(parent_id);
+
+        // Replace parent split with sibling
+        if let Some(gp_id) = grandparent_id {
+            // Update grandparent's child reference
+            if let Some(Node::Split { split: gp_split, .. }) = self.nodes.get_mut(gp_id) {
+                if gp_split.first == parent_id {
+                    gp_split.first = sibling_id;
+                } else {
+                    gp_split.second = sibling_id;
+                }
+            }
+            // Update sibling's parent
+            self.set_parent(sibling_id, Some(gp_id));
+        } else {
+            // Parent was root, sibling becomes new root
+            self.root = sibling_id;
+            self.set_parent(sibling_id, None);
+        }
+
+        // Remove the empty frame and the parent split
+        self.nodes.remove(frame_id);
+        self.nodes.remove(parent_id);
+
+        // Update focused if needed
+        if self.focused == frame_id {
+            // Focus the first frame we can find
+            self.focused = self.all_frames().first().copied().unwrap_or(self.root);
+        }
+
+        true
+    }
+
     /// Cycle to the next/previous tab in the focused frame
     /// Returns the newly focused window (if any)
     pub fn cycle_tab(&mut self, forward: bool) -> Option<Window> {
