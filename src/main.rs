@@ -1017,6 +1017,81 @@ impl Wm {
         Ok(())
     }
 
+    /// Draw a filled rectangle with rounded corners on the left side only.
+    /// Used for vertical tabs (left edge of frame).
+    fn draw_rounded_left_rect(
+        &self,
+        window: Window,
+        x: i16,
+        y: i16,
+        width: u32,
+        height: u32,
+        radius: u32,
+    ) -> Result<()> {
+        let r = radius.min(width / 2).min(height / 2) as i16;
+        let w = width as i16;
+        let h = height as i16;
+
+        // Draw the main body (to the right of the rounded corners)
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: x + r,
+                y,
+                width: (w - r) as u16,
+                height: height as u16,
+            }],
+        )?;
+
+        // Draw the left middle section (between the two corners)
+        if h > 2 * r {
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x,
+                    y: y + r,
+                    width: r as u16,
+                    height: (h - 2 * r) as u16,
+                }],
+            )?;
+        }
+
+        // Draw top-left corner arc (quarter circle)
+        // Arc angles are in 1/64th of a degree, starting from 3 o'clock going counterclockwise
+        // Top-left: start at 90°, sweep 90° counterclockwise to 180°
+        self.conn.poly_fill_arc(
+            window,
+            self.gc,
+            &[Arc {
+                x,
+                y,
+                width: (2 * r) as u16,
+                height: (2 * r) as u16,
+                angle1: 90 * 64,  // Start at 12 o'clock
+                angle2: 90 * 64,  // Sweep 90° counterclockwise to 9 o'clock
+            }],
+        )?;
+
+        // Draw bottom-left corner arc
+        // Bottom-left: start at 180°, sweep 90° counterclockwise to 270°
+        self.conn.poly_fill_arc(
+            window,
+            self.gc,
+            &[Arc {
+                x,
+                y: y + h - 2 * r,
+                width: (2 * r) as u16,
+                height: (2 * r) as u16,
+                angle1: 180 * 64, // Start at 9 o'clock
+                angle2: 90 * 64,  // Sweep 90° counterclockwise to 6 o'clock
+            }],
+        )?;
+
+        Ok(())
+    }
+
     /// Sample the root window background at the given position
     /// Returns the pixel data that can be drawn with put_image
     fn sample_root_background(&self, x: i16, y: i16, width: u16, height: u16) -> Option<Vec<u8>> {
@@ -1125,6 +1200,7 @@ impl Wm {
     ) -> Result<()> {
         let width = tab_size;
         let height = tab_size;
+        let corner_radius: u32 = 4; // Smaller radius for vertical tabs (vs 6px for horizontal)
 
         // Determine background color (same priority as horizontal)
         let is_urgent = self.urgent_windows.contains(&client_window);
@@ -1140,29 +1216,66 @@ impl Wm {
             self.config.tab_unfocused_bg
         };
 
-        // Draw tab background (simple rectangle for vertical tabs)
+        // Draw drop shadow for focused tabs (before tab background so it appears behind)
+        if is_focused {
+            let shadow_color = darken_color(bg_color, 0.3);
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(shadow_color))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: 2,
+                    y: y + 2,
+                    width: width as u16,
+                    height: height as u16,
+                }],
+            )?;
+        }
+
+        // Draw tab background with rounded left corners
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
+        self.draw_rounded_left_rect(window, 0, y, width, height, corner_radius)?;
+
+        // Draw bevel effect for 3D raised appearance
+        let bevel_light = lighten_color(bg_color, 0x20);
+        let bevel_dark = darken_color(bg_color, 0.7);
+
+        // Left highlight (inside rounded corners)
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_light))?;
         self.conn.poly_fill_rectangle(
             window,
             self.gc,
             &[Rectangle {
-                x: 0,
+                x: 1,
+                y: y + corner_radius as i16,
+                width: 1,
+                height: (height - corner_radius * 2) as u16,
+            }],
+        )?;
+
+        // Right shadow line
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: (width - 1) as i16,
                 y,
-                width: width as u16,
+                width: 1,
                 height: height as u16,
             }],
         )?;
 
-        // Draw separator line below (unless last tab)
+        // Draw separator line below (unless last tab or focused)
         if !is_last && !is_focused {
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
             self.conn.poly_segment(
                 window,
                 self.gc,
                 &[Segment {
-                    x1: 4,
+                    x1: corner_radius as i16,
                     y1: y + height as i16 - 1,
-                    x2: (width - 4) as i16,
+                    x2: (width - 1) as i16,
                     y2: y + height as i16 - 1,
                 }],
             )?;
