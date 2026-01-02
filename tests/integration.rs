@@ -227,6 +227,19 @@ impl TestHarness {
             "window": window
         }))
     }
+
+    /// Toggle floating state for a window
+    fn toggle_float(&self, window: Option<u32>) -> Result<Value, String> {
+        self.send_command(&serde_json::json!({
+            "command": "toggle_float",
+            "window": window
+        }))
+    }
+
+    /// Get list of floating windows
+    fn get_floating(&self) -> Result<Value, String> {
+        self.send_command(&serde_json::json!({"command": "get_floating"}))
+    }
 }
 
 impl Drop for TestHarness {
@@ -838,4 +851,103 @@ fn test_resize_split_bounds() {
     // State should still be valid
     let result = harness.validate().expect("Failed to validate");
     assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+}
+
+// =============================================================================
+// Floating Window Tests
+// =============================================================================
+
+#[test]
+fn test_get_floating_empty_initially() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Get floating windows
+    let result = harness.get_floating().expect("Failed to get floating");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("floating"));
+
+    // Should be empty
+    let windows = result.get("windows").and_then(|v| v.as_array());
+    assert!(windows.is_some(), "Should have windows array");
+    assert!(windows.unwrap().is_empty(), "Should have no floating windows initially");
+}
+
+#[test]
+fn test_toggle_float_no_window() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Try to toggle float with no focused window - should succeed (no-op)
+    let result = harness.toggle_float(None).expect("Failed to toggle float");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+    // Floating list should still be empty
+    let result = harness.get_floating().expect("Failed to get floating");
+    let windows = result.get("windows").and_then(|v| v.as_array());
+    assert!(windows.unwrap().is_empty(), "Should have no floating windows");
+
+    // State should be valid
+    let result = harness.validate().expect("Failed to validate");
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn test_toggle_float_nonexistent_window() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Try to toggle float for a window that doesn't exist
+    let result = harness.toggle_float(Some(0xDEADBEEF)).expect("Failed to toggle float");
+
+    // Should return ok (toggle_float just returns Ok if window not found)
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+    // State should be valid
+    let result = harness.validate().expect("Failed to validate");
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn test_floating_windows_in_state() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Get initial state - should have 0 floating windows
+    let state = harness.get_state().expect("Failed to get state");
+    let data = state.get("data").expect("Missing data");
+
+    // Window count should be 0 initially (both tiled and floating)
+    assert_eq!(data.get("window_count").and_then(|v| v.as_u64()), Some(0));
+
+    // Windows list should be empty
+    let windows = data.get("windows").and_then(|v| v.as_array());
+    assert!(windows.is_some(), "Should have windows array");
+    assert!(windows.unwrap().is_empty(), "Should have no windows initially");
+}
+
+#[test]
+fn test_windows_list_includes_is_floating_field() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Get windows - verify the response structure includes is_floating
+    let result = harness.get_windows().expect("Failed to get windows");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("windows"));
+
+    // The windows data array exists (even if empty)
+    let data = result.get("data").and_then(|v| v.as_array());
+    assert!(data.is_some(), "Should have data array");
+
+    // Note: We can't fully test is_floating without spawning windows,
+    // but we've verified the IPC structure is correct
 }

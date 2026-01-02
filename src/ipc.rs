@@ -366,4 +366,97 @@ mod tests {
             panic!("Expected Split command");
         }
     }
+
+    #[test]
+    fn test_toggle_float_command_serialization() {
+        // With window specified
+        let cmd = IpcCommand::ToggleFloat { window: Some(12345) };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("toggle_float"));
+        assert!(json.contains("12345"));
+
+        // Without window (uses focused)
+        let cmd = IpcCommand::ToggleFloat { window: None };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("toggle_float"));
+        assert!(json.contains("null"));
+    }
+
+    #[test]
+    fn test_toggle_float_command_deserialization() {
+        let json = r#"{"command": "toggle_float", "window": 42}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, IpcCommand::ToggleFloat { window: Some(42) }));
+
+        let json = r#"{"command": "toggle_float", "window": null}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, IpcCommand::ToggleFloat { window: None }));
+
+        let json = r#"{"command": "toggle_float"}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, IpcCommand::ToggleFloat { window: None }));
+    }
+
+    #[test]
+    fn test_get_floating_command_serialization() {
+        let cmd = IpcCommand::GetFloating;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("get_floating"));
+    }
+
+    #[test]
+    fn test_get_floating_command_deserialization() {
+        let json = r#"{"command": "get_floating"}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, IpcCommand::GetFloating));
+    }
+
+    #[test]
+    fn test_floating_response_serialization() {
+        let resp = IpcResponse::Floating {
+            windows: vec![100, 200, 300],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("floating"));
+        assert!(json.contains("100"));
+        assert!(json.contains("200"));
+        assert!(json.contains("300"));
+    }
+
+    #[test]
+    fn test_floating_response_empty() {
+        let resp = IpcResponse::Floating { windows: vec![] };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("floating"));
+        assert!(json.contains("[]"));
+    }
+
+    #[test]
+    fn test_window_info_with_is_floating() {
+        let info = WindowInfo {
+            id: 12345,
+            title: "Test Window".to_string(),
+            frame: "floating".to_string(),
+            tab_index: 0,
+            is_focused: true,
+            is_visible: true,
+            is_tagged: false,
+            is_floating: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"is_floating\":true"));
+
+        let info = WindowInfo {
+            id: 12345,
+            title: "Test Window".to_string(),
+            frame: "frame_1".to_string(),
+            tab_index: 0,
+            is_focused: false,
+            is_visible: true,
+            is_tagged: false,
+            is_floating: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"is_floating\":false"));
+    }
 }
