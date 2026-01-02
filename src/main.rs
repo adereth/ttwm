@@ -1243,7 +1243,9 @@ impl Wm {
 
         for key in to_remove {
             if let Some(window) = self.tab_bar_windows.remove(&key) {
-                let _ = self.conn.destroy_window(window);
+                if let Err(e) = self.conn.destroy_window(window) {
+                    log::error!("Failed to destroy tab bar window: {}", e);
+                }
             }
         }
     }
@@ -1479,12 +1481,12 @@ impl Wm {
     }
 
     /// Unmanage a window
-    fn unmanage_window(&mut self, window: Window) {
+    fn unmanage_window(&mut self, window: Window) -> Result<()> {
         // Cancel drag if we're dragging this window
         if let Some(DragState::Tab { window: dragged_window, .. }) = self.drag_state {
             if dragged_window == window {
                 // Ungrab pointer and clear drag state
-                let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
+                self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?;
                 self.drag_state = None;
                 log::info!("Cancelled drag - dragged window was destroyed");
             }
@@ -1508,7 +1510,7 @@ impl Wm {
             log::info!("Unmanaging window 0x{:x}", window);
 
             // Update EWMH client list
-            let _ = self.update_client_list();
+            self.update_client_list()?;
 
             // If this was focused, focus another window
             if self.focused_window == Some(window) {
@@ -1517,7 +1519,7 @@ impl Wm {
                 // Try to focus the window in the focused frame
                 if let Some(frame) = self.workspaces.current().layout.focused_frame() {
                     if let Some(w) = frame.focused_window() {
-                        let _ = self.focus_window(w);
+                        self.focus_window(w)?;
                     }
                 }
 
@@ -1525,16 +1527,18 @@ impl Wm {
                 if self.focused_window.is_none() {
                     let windows = self.workspaces.current().layout.all_windows();
                     if let Some(&w) = windows.first() {
-                        let _ = self.focus_window(w);
+                        self.focus_window(w)?;
                     } else {
-                        let _ = self.update_active_window();
+                        self.update_active_window()?;
                     }
                 }
             }
 
             // Re-apply layout
-            let _ = self.apply_layout();
+            self.apply_layout()?;
         }
+
+        Ok(())
     }
 
     /// Cycle focus to the next/previous window (across all frames)
@@ -1945,14 +1949,18 @@ impl Wm {
                 // and not from a reparent operation
                 // Also skip if we intentionally hid this window (it's a hidden tab)
                 if e.event == self.root && !self.hidden_windows.contains(&e.window) {
-                    self.unmanage_window(e.window);
+                    if let Err(e) = self.unmanage_window(e.window) {
+                        log::error!("Failed to unmanage window: {}", e);
+                    }
                 }
             }
 
             Event::DestroyNotify(e) => {
                 self.tracer.trace_x11_event("DestroyNotify", Some(e.window), "");
                 log::debug!("DestroyNotify for window 0x{:x}", e.window);
-                self.unmanage_window(e.window);
+                if let Err(err) = self.unmanage_window(e.window) {
+                    log::error!("Failed to unmanage window: {}", err);
+                }
             }
 
             Event::ConfigureRequest(e) => {

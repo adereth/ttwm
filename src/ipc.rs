@@ -218,10 +218,12 @@ impl IpcServer {
                                 log::warn!("Invalid IPC command: {}", e);
                                 // Send error response
                                 let mut client = IpcClient { stream };
-                                let _ = client.respond(IpcResponse::Error {
+                                if let Err(resp_err) = client.respond(IpcResponse::Error {
                                     code: "parse_error".to_string(),
                                     message: format!("Failed to parse command: {}", e),
-                                });
+                                }) {
+                                    log::warn!("Failed to send error response: {}", resp_err);
+                                }
                                 None
                             }
                         }
@@ -245,7 +247,9 @@ impl IpcServer {
 impl Drop for IpcServer {
     fn drop(&mut self) {
         // Clean up socket file
-        let _ = std::fs::remove_file(&self.socket_path);
+        if let Err(e) = std::fs::remove_file(&self.socket_path) {
+            log::debug!("Failed to remove socket file {:?}: {}", self.socket_path, e);
+        }
     }
 }
 
