@@ -2617,7 +2617,6 @@ impl Wm {
 
         // Remove from source workspace
         self.monitors.focused_mut().workspaces.workspaces[source_ws].layout.remove_window(window);
-        self.monitors.focused_mut().workspaces.workspaces[source_ws].layout.remove_empty_frames();
 
         // Add to target workspace
         self.monitors.focused_mut().workspaces.workspaces[target].layout.add_window(window);
@@ -3346,8 +3345,6 @@ impl Wm {
                 to_frame: format!("{:?}", to_frame),
             });
 
-            // Clean up empty frames
-            self.workspaces_mut().current_mut().layout.remove_empty_frames();
             self.apply_layout()?;
             self.suppress_enter_focus = true;
             self.focus_window(window)?;
