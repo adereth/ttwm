@@ -2065,40 +2065,29 @@ impl Wm {
             self.update_urgent_indicator()?;
         }
 
-        // Check if this is a floating window
-        if self.workspaces().current().is_floating(window) {
-            self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
-                window,
-                reason: UnmanageReason::ClientDestroyed,
-            });
+        // Find which workspace contains this window (search ALL workspaces)
+        let ws_idx = self.find_window_workspace(window);
 
-            self.workspaces_mut().current_mut().remove_floating(window);
-            log::info!("Unmanaging floating window 0x{:x}", window);
+        if let Some(ws_idx) = ws_idx {
+            // Check if floating on that workspace
+            if self.monitors.focused().workspaces.workspaces[ws_idx].is_floating(window) {
+                self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
+                    window,
+                    reason: UnmanageReason::ClientDestroyed,
+                });
 
-            // Update EWMH client list
-            self.update_client_list()?;
+                self.monitors.focused_mut().workspaces.workspaces[ws_idx].remove_floating(window);
+                log::info!("Unmanaging floating window 0x{:x} from workspace {}", window, ws_idx + 1);
+            } else {
+                // Tiled window
+                self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
+                    window,
+                    reason: UnmanageReason::ClientDestroyed,
+                });
 
-            // If this was focused, focus another window
-            if self.focused_window == Some(window) {
-                self.focused_window = None;
-                self.focus_next_available_window()?;
+                self.monitors.focused_mut().workspaces.workspaces[ws_idx].layout.remove_window(window);
+                log::info!("Unmanaging window 0x{:x} from workspace {}", window, ws_idx + 1);
             }
-
-            // Re-apply layout
-            self.apply_layout()?;
-            return Ok(());
-        }
-
-        // Trace before removing (tiled window)
-        if self.workspaces().current().layout.find_window(window).is_some() {
-            self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
-                window,
-                reason: UnmanageReason::ClientDestroyed,
-            });
-        }
-
-        if let Some(_frame_id) = self.workspaces_mut().current_mut().layout.remove_window(window) {
-            log::info!("Unmanaging window 0x{:x}", window);
 
             // Update EWMH client list
             self.update_client_list()?;
