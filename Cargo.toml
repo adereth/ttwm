@@ -12,7 +12,6 @@ repository = "https://github.com/yourusername/ttwm"
 x11rb = { version = "0.13", features = ["randr", "xinerama", "cursor"] }
 
 # Error handling
-thiserror = "1"
 anyhow = "1"
 
 # Logging
