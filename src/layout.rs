@@ -212,6 +212,13 @@ impl LayoutTree {
         }
     }
 
+    /// Add a window to a specific frame (for cross-workspace moves)
+    pub fn add_window_to_frame(&mut self, window: Window, frame_id: NodeId) {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(frame_id) {
+            frame.add_window(window);
+        }
+    }
+
     /// Remove a window from any frame that contains it
     pub fn remove_window(&mut self, window: Window) -> Option<NodeId> {
         // Find and remove from whichever frame contains it

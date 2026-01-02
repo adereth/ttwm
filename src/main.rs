@@ -557,19 +557,42 @@ impl Wm {
 
     /// Move all tagged windows to the currently focused frame and untag them
     fn move_tagged_to_focused_frame(&mut self) -> Result<()> {
+        let current_ws = self.workspaces().current_index();
         let target_frame = self.workspaces().current().layout.focused;
         let tagged: Vec<Window> = self.tagged_windows.iter().copied().collect();
         let count = tagged.len();
 
         let mut last_moved: Option<Window> = None;
         for window in tagged {
-            if let Some(source_frame) = self.workspaces_mut().current_mut().layout.find_window(window) {
-                if source_frame != target_frame {
-                    self.workspaces_mut().current_mut().layout.move_window_to_frame(
-                        window,
-                        source_frame,
-                        target_frame,
-                    );
+            // Search ALL workspaces for this window
+            let source_ws = self.monitors.focused().workspaces.workspaces.iter()
+                .enumerate()
+                .find(|(_, ws)| ws.layout.find_window(window).is_some())
+                .map(|(idx, _)| idx);
+
+            if let Some(source_ws) = source_ws {
+                if source_ws == current_ws {
+                    // Same workspace - use existing move logic
+                    if let Some(source_frame) = self.workspaces_mut().current_mut().layout.find_window(window) {
+                        if source_frame != target_frame {
+                            self.workspaces_mut().current_mut().layout.move_window_to_frame(
+                                window,
+                                source_frame,
+                                target_frame,
+                            );
+                            last_moved = Some(window);
+                        }
+                    }
+                } else {
+                    // Different workspace - cross-workspace move
+                    // 1. Hide window (it's moving to current workspace)
+                    self.conn.unmap_window(window)?;
+                    // 2. Remove from source workspace
+                    self.monitors.focused_mut().workspaces.workspaces[source_ws].layout.remove_window(window);
+                    // 3. Add to target frame on current workspace
+                    self.workspaces_mut().current_mut().layout.add_window_to_frame(window, target_frame);
+                    // 4. Update _NET_WM_DESKTOP property
+                    self.set_window_desktop(window, current_ws)?;
                     last_moved = Some(window);
                 }
             }
