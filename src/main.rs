@@ -43,8 +43,10 @@ struct LayoutConfig {
     outer_gap: u32,
     /// Border width
     border_width: u32,
-    /// Tab bar height
+    /// Tab bar height (for horizontal tabs)
     tab_bar_height: u32,
+    /// Vertical tab bar width (for vertical tabs)
+    vertical_tab_width: u32,
     /// Tab bar background color
     tab_bar_bg: u32,
     /// Tab bar focused tab color
@@ -78,6 +80,7 @@ impl Default for LayoutConfig {
             outer_gap: 8,
             border_width: 2,
             tab_bar_height: 28,
+            vertical_tab_width: 28,
             tab_bar_bg: 0x000000,       // Black (fallback)
             tab_focused_bg: 0x5294e2,   // Blue (matching border)
             tab_unfocused_bg: 0x3a3a3a, // Darker gray
@@ -278,6 +281,7 @@ impl Wm {
             outer_gap: user_config.appearance.outer_gap,
             border_width: user_config.appearance.border_width,
             tab_bar_height: user_config.appearance.tab_bar_height,
+            vertical_tab_width: user_config.appearance.vertical_tab_width,
             tab_bar_bg: parse_color(&user_config.colors.tab_bar_bg).unwrap_or(0x2e2e2e),
             tab_focused_bg: parse_color(&user_config.colors.tab_focused_bg).unwrap_or(0x5294e2),
             tab_unfocused_bg: parse_color(&user_config.colors.tab_unfocused_bg).unwrap_or(0x3a3a3a),
@@ -757,20 +761,29 @@ impl Wm {
     }
 
     /// Get or create a tab bar window for a frame
-    fn get_or_create_tab_bar(&mut self, frame_id: NodeId, rect: &Rect) -> Result<Window> {
+    fn get_or_create_tab_bar(&mut self, frame_id: NodeId, rect: &Rect, vertical: bool) -> Result<Window> {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         let key = (mon_id, ws_idx, frame_id);
+
+        // Calculate dimensions based on orientation
+        let (x, y, width, height) = if vertical {
+            // Vertical: left side of frame, full height
+            (rect.x, rect.y, self.config.vertical_tab_width, rect.height)
+        } else {
+            // Horizontal: top of frame, full width
+            (rect.x, rect.y, rect.width, self.config.tab_bar_height)
+        };
 
         if let Some(&window) = self.tab_bar_windows.get(&key) {
             // Update position and size
             self.conn.configure_window(
                 window,
                 &ConfigureWindowAux::new()
-                    .x(rect.x)
-                    .y(rect.y)
-                    .width(rect.width)
-                    .height(self.config.tab_bar_height),
+                    .x(x)
+                    .y(y)
+                    .width(width)
+                    .height(height),
             )?;
             return Ok(window);
         }
@@ -781,10 +794,10 @@ impl Wm {
             x11rb::COPY_DEPTH_FROM_PARENT,
             window,
             self.root,
-            rect.x as i16,
-            rect.y as i16,
-            rect.width as u16,
-            self.config.tab_bar_height as u16,
+            x as i16,
+            y as i16,
+            width as u16,
+            height as u16,
             0, // border width
             WindowClass::INPUT_OUTPUT,
             x11rb::COPY_FROM_PARENT,
@@ -1057,6 +1070,128 @@ impl Wm {
         Ok(())
     }
 
+    /// Draw the background for a vertical tab bar.
+    fn draw_vertical_tab_bar_background(&mut self, window: Window, rect: &Rect) -> Result<()> {
+        let width = self.config.vertical_tab_width;
+
+        // Clear with solid color first
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: width as u16,
+                height: rect.height as u16,
+            }],
+        )?;
+
+        // Sample and draw root background on top (pseudo-transparency)
+        if let Some(pixels) = self.sample_root_background(
+            rect.x as i16,
+            rect.y as i16,
+            width as u16,
+            rect.height as u16,
+        ) {
+            self.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                window,
+                self.gc,
+                width as u16,
+                rect.height as u16,
+                0, 0,
+                0,
+                self.screen_depth,
+                &pixels,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Draw a single vertical tab (icon-only).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_single_vertical_tab(
+        &mut self,
+        window: Window,
+        y: i16,
+        tab_size: u32,
+        client_window: Window,
+        is_focused: bool,
+        is_last: bool,
+        is_tagged: bool,
+        is_focused_frame: bool,
+    ) -> Result<()> {
+        let width = tab_size;
+        let height = tab_size;
+
+        // Determine background color (same priority as horizontal)
+        let is_urgent = self.urgent_windows.contains(&client_window);
+        let bg_color = if is_tagged {
+            self.config.tab_tagged_bg
+        } else if is_focused && is_focused_frame {
+            self.config.tab_focused_bg
+        } else if is_urgent {
+            self.config.tab_urgent_bg
+        } else if is_focused {
+            self.config.tab_visible_unfocused_bg
+        } else {
+            self.config.tab_unfocused_bg
+        };
+
+        // Draw tab background (simple rectangle for vertical tabs)
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y,
+                width: width as u16,
+                height: height as u16,
+            }],
+        )?;
+
+        // Draw separator line below (unless last tab)
+        if !is_last && !is_focused {
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
+            self.conn.poly_segment(
+                window,
+                self.gc,
+                &[Segment {
+                    x1: 4,
+                    y1: y + height as i16 - 1,
+                    x2: (width - 4) as i16,
+                    y2: y + height as i16 - 1,
+                }],
+            )?;
+        }
+
+        // Draw icon centered in tab
+        const ICON_SIZE: u32 = 20;
+        if let Some(icon) = self.get_window_icon(client_window) {
+            let blended = blend_icon_with_background(&icon.pixels, bg_color, ICON_SIZE);
+            let icon_x = ((width - ICON_SIZE) / 2) as i16;
+            let icon_y = y + ((height - ICON_SIZE) / 2) as i16;
+
+            self.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                window,
+                self.gc,
+                ICON_SIZE as u16,
+                ICON_SIZE as u16,
+                icon_x,
+                icon_y,
+                0,
+                24,
+                &blended,
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Draw a single tab in the tab bar.
     #[allow(clippy::too_many_arguments)]
     fn draw_single_tab(
@@ -1232,7 +1367,7 @@ impl Wm {
     }
 
     /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
-    fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
+    fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect, vertical: bool) -> Result<()> {
         // Extract all needed data from frame before any mutable calls
         let (windows, focused_tab, is_empty) = {
             let frame = match self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
@@ -1242,40 +1377,67 @@ impl Wm {
             (frame.windows.clone(), frame.focused, frame.windows.is_empty())
         };
 
-        // Draw pseudo-transparent background
-        self.draw_tab_bar_background(window, rect)?;
+        // Draw background
+        if vertical {
+            self.draw_vertical_tab_bar_background(window, rect)?;
+        } else {
+            self.draw_tab_bar_background(window, rect)?;
+        }
 
         // Empty frame - nothing to draw in tab bar (border is on the placeholder window)
         if is_empty {
             return Ok(());
         }
 
-        // Get tab layout (content-based widths, left-aligned)
-        let tab_layout = self.calculate_tab_layout(frame_id);
-
         // Check if this frame is the focused frame
         let is_focused_frame = frame_id == self.workspaces().current().layout.focused;
-        let show_icons = self.config.show_tab_icons;
-        let num_tabs = windows.len();
 
-        // Draw each tab
-        for (i, &client_window) in windows.iter().enumerate() {
-            let (x, tab_width) = tab_layout[i];
-            let is_focused = i == focused_tab;
-            let is_last = i == num_tabs - 1;
-            let is_tagged = self.tagged_windows.contains(&client_window);
+        if vertical {
+            // Draw vertical tabs (icon-only)
+            let tab_size = self.config.vertical_tab_width;
+            let num_tabs = windows.len();
 
-            self.draw_single_tab(
-                window,
-                x,
-                tab_width,
-                client_window,
-                is_focused,
-                is_last,
-                is_tagged,
-                is_focused_frame,
-                show_icons,
-            )?;
+            for (i, &client_window) in windows.iter().enumerate() {
+                let y = (i as u32 * tab_size) as i16;
+                let is_focused = i == focused_tab;
+                let is_last = i == num_tabs - 1;
+                let is_tagged = self.tagged_windows.contains(&client_window);
+
+                self.draw_single_vertical_tab(
+                    window,
+                    y,
+                    tab_size,
+                    client_window,
+                    is_focused,
+                    is_last,
+                    is_tagged,
+                    is_focused_frame,
+                )?;
+            }
+        } else {
+            // Draw horizontal tabs (with text)
+            let tab_layout = self.calculate_tab_layout(frame_id);
+            let show_icons = self.config.show_tab_icons;
+            let num_tabs = windows.len();
+
+            for (i, &client_window) in windows.iter().enumerate() {
+                let (x, tab_width) = tab_layout[i];
+                let is_focused = i == focused_tab;
+                let is_last = i == num_tabs - 1;
+                let is_tagged = self.tagged_windows.contains(&client_window);
+
+                self.draw_single_tab(
+                    window,
+                    x,
+                    tab_width,
+                    client_window,
+                    is_focused,
+                    is_last,
+                    is_tagged,
+                    is_focused_frame,
+                    show_icons,
+                )?;
+            }
         }
 
         Ok(())
@@ -1438,6 +1600,12 @@ impl Wm {
 
         // Find the frame containing this window
         if let Some(frame_id) = self.workspaces().current().layout.find_window(window) {
+            // Get vertical_tabs state
+            let vertical = self.workspaces().current().layout.get(frame_id)
+                .and_then(|n| n.as_frame())
+                .map(|f| f.vertical_tabs)
+                .unwrap_or(false);
+
             // Get tab bar window for this frame
             if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
                 // Get frame geometry
@@ -1448,7 +1616,7 @@ impl Wm {
                 );
 
                 if let Some(rect) = geometries.iter().find(|(fid, _)| *fid == frame_id).map(|(_, r)| r.clone()) {
-                    self.draw_tab_bar(frame_id, tab_window, &rect)?;
+                    self.draw_tab_bar(frame_id, tab_window, &rect, vertical)?;
                     self.conn.flush()?;
                 }
             }
@@ -1485,8 +1653,8 @@ impl Wm {
         // Get the focused frame id
         let focused_frame_id = self.workspaces().current().layout.focused;
 
-        // Collect frame info for tab bar management
-        let mut frames_with_tabs: Vec<(NodeId, Rect, usize)> = Vec::new();
+        // Collect frame info for tab bar management (frame_id, rect, window_count, vertical_tabs)
+        let mut frames_with_tabs: Vec<(NodeId, Rect, usize, bool)> = Vec::new();
         // Track empty frames for placeholder windows
         let mut empty_frames: Vec<(NodeId, Rect, bool)> = Vec::new();
         // Track non-empty frames to destroy their placeholder windows
@@ -1498,6 +1666,7 @@ impl Wm {
             rect: Rect,
             windows: Vec<Window>,
             focused_idx: usize,
+            vertical_tabs: bool,
         }
         let frame_data: Vec<FrameData> = geometries.iter()
             .filter_map(|(frame_id, rect)| {
@@ -1508,31 +1677,40 @@ impl Wm {
                         rect: rect.clone(),
                         windows: frame.windows.clone(),
                         focused_idx: frame.focused,
+                        vertical_tabs: frame.vertical_tabs,
                     })
             })
             .collect();
 
         let border = self.config.border_width;
         let tab_bar_height = self.config.tab_bar_height;
+        let vertical_tab_width = self.config.vertical_tab_width;
 
         for fd in &frame_data {
-            // Calculate client area (below tab bar)
+            // Calculate client area based on tab orientation
             // Always show tab bar, even for empty frames (to allow middle-click removal)
             let has_tabs = true;
-            let client_y = if has_tabs {
-                fd.rect.y + tab_bar_height as i32
+            let (client_x, client_y, client_width, client_height) = if fd.vertical_tabs {
+                // Vertical tabs: client area is to the right of the tab bar
+                (
+                    fd.rect.x + vertical_tab_width as i32,
+                    fd.rect.y,
+                    fd.rect.width.saturating_sub(vertical_tab_width),
+                    fd.rect.height,
+                )
             } else {
-                fd.rect.y
-            };
-            let client_height = if has_tabs {
-                fd.rect.height.saturating_sub(tab_bar_height)
-            } else {
-                fd.rect.height
+                // Horizontal tabs: client area is below the tab bar
+                (
+                    fd.rect.x,
+                    if has_tabs { fd.rect.y + tab_bar_height as i32 } else { fd.rect.y },
+                    fd.rect.width,
+                    if has_tabs { fd.rect.height.saturating_sub(tab_bar_height) } else { fd.rect.height },
+                )
             };
 
             if has_tabs {
-                log::debug!("Frame {:?} has {} windows, will show tab bar", fd.frame_id, fd.windows.len());
-                frames_with_tabs.push((fd.frame_id, fd.rect.clone(), fd.windows.len()));
+                log::debug!("Frame {:?} has {} windows, will show tab bar (vertical={})", fd.frame_id, fd.windows.len(), fd.vertical_tabs);
+                frames_with_tabs.push((fd.frame_id, fd.rect.clone(), fd.windows.len(), fd.vertical_tabs));
             } else {
                 // Hide tab bar for single-window frames
                 let mon_id = self.monitors.focused_id();
@@ -1557,9 +1735,9 @@ impl Wm {
                     self.conn.configure_window(
                         window,
                         &ConfigureWindowAux::new()
-                            .x(fd.rect.x)
+                            .x(client_x)
                             .y(client_y)
-                            .width(fd.rect.width.saturating_sub(border * 2))
+                            .width(client_width.saturating_sub(border * 2))
                             .height(client_height.saturating_sub(border * 2))
                             .border_width(border),
                     )?;
@@ -1576,17 +1754,22 @@ impl Wm {
         }
 
         // Create/update tab bars for frames with multiple windows
-        for (frame_id, rect, _) in frames_with_tabs {
-            let tab_window = self.get_or_create_tab_bar(frame_id, &rect)?;
-            log::info!("Tab bar window 0x{:x} for frame {:?} at ({}, {}) {}x{}",
-                tab_window, frame_id, rect.x, rect.y, rect.width, self.config.tab_bar_height);
+        for (frame_id, rect, _, vertical) in frames_with_tabs {
+            let tab_window = self.get_or_create_tab_bar(frame_id, &rect, vertical)?;
+            let (w, h) = if vertical {
+                (self.config.vertical_tab_width, rect.height)
+            } else {
+                (rect.width, self.config.tab_bar_height)
+            };
+            log::info!("Tab bar window 0x{:x} for frame {:?} at ({}, {}) {}x{} (vertical={})",
+                tab_window, frame_id, rect.x, rect.y, w, h, vertical);
             self.conn.map_window(tab_window)?;
             // Raise the tab bar above client windows
             self.conn.configure_window(
                 tab_window,
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
-            self.draw_tab_bar(frame_id, tab_window, &rect)?;
+            self.draw_tab_bar(frame_id, tab_window, &rect, vertical)?;
         }
 
         // Create/update empty frame placeholder windows (with borders)
@@ -2187,6 +2370,14 @@ impl Wm {
         Ok(())
     }
 
+    /// Toggle vertical tabs on the focused frame
+    fn toggle_vertical_tabs(&mut self) -> Result<()> {
+        let is_vertical = self.workspaces_mut().current_mut().layout.toggle_vertical_tabs();
+        log::info!("Toggled tabs to {}", if is_vertical { "vertical" } else { "horizontal" });
+        self.apply_layout()?;
+        Ok(())
+    }
+
     /// Cycle focus to the next/previous window (across all frames and floating windows)
     fn cycle_focus(&mut self, forward: bool) -> Result<()> {
         // Build a list of all windows: tiled first, then floating
@@ -2305,12 +2496,20 @@ impl Wm {
 
                 if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&old_focused_frame) {
-                        self.draw_tab_bar(old_focused_frame, tab_window, rect)?;
+                        let vertical = self.workspaces().current().layout.get(old_focused_frame)
+                            .and_then(|n| n.as_frame())
+                            .map(|f| f.vertical_tabs)
+                            .unwrap_or(false);
+                        self.draw_tab_bar(old_focused_frame, tab_window, rect, vertical)?;
                     }
                 }
                 if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, new_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&new_focused_frame) {
-                        self.draw_tab_bar(new_focused_frame, tab_window, rect)?;
+                        let vertical = self.workspaces().current().layout.get(new_focused_frame)
+                            .and_then(|n| n.as_frame())
+                            .map(|f| f.vertical_tabs)
+                            .unwrap_or(false);
+                        self.draw_tab_bar(new_focused_frame, tab_window, rect, vertical)?;
                     }
                 }
 
@@ -2467,7 +2666,11 @@ impl Wm {
             if old_focused_frame != frame_id {
                 if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&old_focused_frame) {
-                        self.draw_tab_bar(old_focused_frame, tab_window, rect)?;
+                        let vertical = self.workspaces().current().layout.get(old_focused_frame)
+                            .and_then(|n| n.as_frame())
+                            .map(|f| f.vertical_tabs)
+                            .unwrap_or(false);
+                        self.draw_tab_bar(old_focused_frame, tab_window, rect, vertical)?;
                     }
                 }
             }
@@ -2475,7 +2678,11 @@ impl Wm {
             // Always redraw current frame's tab bar (new tabs, focus changes, etc.)
             if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
                 if let Some(rect) = geometry_map.get(&frame_id) {
-                    self.draw_tab_bar(frame_id, tab_window, rect)?;
+                    let vertical = self.workspaces().current().layout.get(frame_id)
+                        .and_then(|n| n.as_frame())
+                        .map(|f| f.vertical_tabs)
+                        .unwrap_or(false);
+                    self.draw_tab_bar(frame_id, tab_window, rect, vertical)?;
                 }
             }
         }
@@ -2895,12 +3102,18 @@ impl Wm {
         // Find which frame this tab bar belongs to
         for (&(m, idx, frame_id), &tab_window) in &self.tab_bar_windows {
             if m == mon_id && idx == ws_idx && tab_window == event.window {
+                // Get vertical_tabs state
+                let vertical = self.workspaces().current().layout.get(frame_id)
+                    .and_then(|n| n.as_frame())
+                    .map(|f| f.vertical_tabs)
+                    .unwrap_or(false);
+
                 // Get frame geometry to redraw
                 let screen_rect = self.usable_screen();
                 let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
                 for (fid, rect) in geometries {
                     if fid == frame_id {
-                        self.draw_tab_bar(frame_id, tab_window, &rect)?;
+                        self.draw_tab_bar(frame_id, tab_window, &rect, vertical)?;
                         self.conn.flush()?;
                         break;
                     }
@@ -3015,6 +3228,7 @@ impl Wm {
         // Get frame and handle click
         if let Some(frame) = self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
             let num_tabs = frame.windows.len();
+            let is_vertical = frame.vertical_tabs;
             if num_tabs == 0 {
                 // Focus the empty frame
                 self.workspaces_mut().current_mut().layout.focused = frame_id;
@@ -3022,12 +3236,25 @@ impl Wm {
                 return Ok(());
             }
 
-            // Calculate which tab was clicked using content-based layout
-            let tab_layout = self.calculate_tab_layout(frame_id);
-            let click_x = event.event_x as i16;
-            let clicked_tab = tab_layout.iter().enumerate()
-                .find(|(_, (x, w))| click_x >= *x && click_x < *x + *w as i16)
-                .map(|(i, _)| i);
+            // Calculate which tab was clicked
+            let clicked_tab = if is_vertical {
+                // Vertical tabs: each tab is a square of vertical_tab_width size
+                let tab_size = self.config.vertical_tab_width;
+                let click_y = event.event_y as u32;
+                let index = click_y / tab_size;
+                if (index as usize) < num_tabs {
+                    Some(index as usize)
+                } else {
+                    None
+                }
+            } else {
+                // Horizontal tabs: use content-based layout
+                let tab_layout = self.calculate_tab_layout(frame_id);
+                let click_x = event.event_x as i16;
+                tab_layout.iter().enumerate()
+                    .find(|(_, (x, w))| click_x >= *x && click_x < *x + *w as i16)
+                    .map(|(i, _)| i)
+            };
 
             if let Some(clicked_tab) = clicked_tab {
                 // Get the window at this tab
@@ -3239,12 +3466,40 @@ impl Wm {
             if root_x >= tab_x && root_x < tab_x + geom.width as i16 &&
                root_y >= tab_y && root_y < tab_y + geom.height as i16 {
                 // Cursor is over this tab bar
-                // Calculate which tab position using content-based layout
-                let tab_layout = self.calculate_tab_layout(frame_id);
-                let local_x = root_x - tab_x;
-                let target_index = tab_layout.iter().enumerate()
-                    .find(|(_, (x, w))| local_x >= *x && local_x < *x + *w as i16)
-                    .map(|(i, _)| i);
+                // Check if this frame uses vertical tabs
+                let is_vertical = self.workspaces().current().layout
+                    .get(frame_id)
+                    .and_then(|n| n.as_frame())
+                    .map(|f| f.vertical_tabs)
+                    .unwrap_or(false);
+
+                let target_index = if is_vertical {
+                    // Vertical tabs: use y position
+                    let local_y = root_y - tab_y;
+                    let tab_size = self.config.vertical_tab_width;
+                    if local_y >= 0 {
+                        let num_tabs = self.workspaces().current().layout
+                            .get(frame_id)
+                            .and_then(|n| n.as_frame())
+                            .map(|f| f.windows.len())
+                            .unwrap_or(0);
+                        let index = (local_y as u32) / tab_size;
+                        if (index as usize) < num_tabs {
+                            Some(index as usize)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    // Horizontal tabs: use content-based layout
+                    let tab_layout = self.calculate_tab_layout(frame_id);
+                    let local_x = root_x - tab_x;
+                    tab_layout.iter().enumerate()
+                        .find(|(_, (x, w))| local_x >= *x && local_x < *x + *w as i16)
+                        .map(|(i, _)| i)
+                };
 
                 if let Some(idx) = target_index {
                     return Ok((Some(frame_id), Some(idx)));
@@ -3449,6 +3704,7 @@ impl Wm {
             WmAction::MoveTaggedToFrame => self.move_tagged_to_focused_frame()?,
             WmAction::UntagAll => self.untag_all_windows()?,
             WmAction::ToggleFloat => self.toggle_float(None)?,
+            WmAction::ToggleVerticalTabs => self.toggle_vertical_tabs()?,
             WmAction::FocusUrgent => self.focus_urgent()?,
             WmAction::FocusMonitorLeft => self.focus_monitor_direction(Direction::Left)?,
             WmAction::FocusMonitorRight => self.focus_monitor_direction(Direction::Right)?,

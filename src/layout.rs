@@ -42,6 +42,8 @@ pub struct Frame {
     pub windows: Vec<Window>,
     /// Currently focused window index
     pub focused: usize,
+    /// Whether tabs are displayed vertically (on left side) instead of horizontally (on top)
+    pub vertical_tabs: bool,
 }
 
 impl Frame {
@@ -49,6 +51,7 @@ impl Frame {
         Self {
             windows: Vec::new(),
             focused: 0,
+            vertical_tabs: false,
         }
     }
 
@@ -57,6 +60,7 @@ impl Frame {
         Self {
             windows: vec![window],
             focused: 0,
+            vertical_tabs: false,
         }
     }
 
@@ -666,6 +670,17 @@ impl LayoutTree {
             frame.focused_window()
         } else {
             None
+        }
+    }
+
+    /// Toggle vertical tabs on the focused frame
+    /// Returns the new vertical_tabs state
+    pub fn toggle_vertical_tabs(&mut self) -> bool {
+        if let Some(frame) = self.focused_frame_mut() {
+            frame.vertical_tabs = !frame.vertical_tabs;
+            frame.vertical_tabs
+        } else {
+            false
         }
     }
 

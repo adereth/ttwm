@@ -27,6 +27,8 @@ A **frame** is a rectangular area on the screen that can hold one or more window
 
 **Tabs** are windows stacked within a single frame. Each tab shows a title in the tab bar at the top of the frame. Click a tab or use keyboard shortcuts to switch between tabs. The focused tab has a highlighted background color.
 
+**Vertical tabs** can be enabled per-frame with `Mod4+/`. In vertical mode, tabs appear on the left side of the frame and display only the application icon (no text). This is useful for frames with many windows where you want to maximize horizontal space. Toggle back to horizontal tabs with the same shortcut.
+
 ### Splits
 
 **Splits** divide a frame into two smaller frames, either horizontally (side-by-side) or vertically (stacked). You can create complex layouts by splitting frames repeatedly. The gap between frames can be dragged to resize the split.
@@ -158,6 +160,7 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 |----------|--------|
 | `Mod4+q` | Close focused window |
 | `Mod4+f` | Toggle floating mode for focused window |
+| `Mod4+/` | Toggle vertical tabs for focused frame |
 | `Mod4+Control+F4` | Quit ttwm |
 
 ### Tab Navigation
@@ -288,6 +291,9 @@ tab_font_size = 12
 
 # Show application icons in tabs (20x20 pixels)
 show_tab_icons = true
+
+# Vertical tab bar width (pixels) - icons only, no text
+vertical_tab_width = 28
 ```
 
 ### Color Settings
@@ -349,7 +355,7 @@ All available keybinding options:
 - `move_window_left`, `move_window_right`
 - `resize_shrink`, `resize_grow`
 - `split_horizontal`, `split_vertical`
-- `close_window`, `toggle_float`, `quit`
+- `close_window`, `toggle_float`, `toggle_vertical_tabs`, `quit`
 - `workspace_next`, `workspace_prev`
 - `tag_window`, `move_tagged_windows`, `untag_all`
 - `focus_monitor_left`, `focus_monitor_right`

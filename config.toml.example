@@ -16,6 +16,8 @@ tab_font = "Segoe UI"
 tab_font_size = 12
 # Show application icons in tabs
 show_tab_icons = true
+# Vertical tab bar width (pixels) - icons only, no text
+vertical_tab_width = 28
 
 [colors]
 # Colors in hex format (#RRGGBB)
@@ -78,6 +80,7 @@ split_vertical = "Mod4+v"
 # Window management
 close_window = "Mod4+q"
 toggle_float = "Mod4+f"
+toggle_vertical_tabs = "Mod4+/"
 quit = "Mod4+Control+F4"
 
 # Workspace navigation (9 virtual desktops)

@@ -41,6 +41,7 @@ pub struct AppearanceConfig {
     pub outer_gap: u32,
     pub border_width: u32,
     pub tab_bar_height: u32,
+    pub vertical_tab_width: u32,
     pub tab_font: String,
     pub tab_font_size: u32,
     pub show_tab_icons: bool,
@@ -98,6 +99,7 @@ pub struct KeybindingConfig {
     pub move_tagged_windows: Option<String>,
     pub untag_all: Option<String>,
     pub toggle_float: Option<String>,
+    pub toggle_vertical_tabs: Option<String>,
     pub focus_urgent: Option<String>,
     pub focus_monitor_left: Option<String>,
     pub focus_monitor_right: Option<String>,
@@ -137,6 +139,7 @@ pub enum WmAction {
     MoveTaggedToFrame,
     UntagAll,
     ToggleFloat,
+    ToggleVerticalTabs,
     FocusUrgent,
     FocusMonitorLeft,
     FocusMonitorRight,
@@ -222,6 +225,7 @@ impl Config {
         insert(WmAction::MoveTaggedToFrame, &self.keybindings.move_tagged_windows);
         insert(WmAction::UntagAll, &self.keybindings.untag_all);
         insert(WmAction::ToggleFloat, &self.keybindings.toggle_float);
+        insert(WmAction::ToggleVerticalTabs, &self.keybindings.toggle_vertical_tabs);
         insert(WmAction::FocusUrgent, &self.keybindings.focus_urgent);
         insert(WmAction::FocusMonitorLeft, &self.keybindings.focus_monitor_left);
         insert(WmAction::FocusMonitorRight, &self.keybindings.focus_monitor_right);
@@ -341,6 +345,8 @@ fn key_to_keysym(key: &str) -> Option<u32> {
         // Bracket keys
         "[" | "bracketleft" => Some(0x5b),
         "]" | "bracketright" => Some(0x5d),
+        // Slash key
+        "/" | "slash" => Some(0x2f),
         _ => {
             log::warn!("Unknown key: {}", key);
             None
@@ -370,6 +376,7 @@ impl Default for AppearanceConfig {
             outer_gap: 8,
             border_width: 2,
             tab_bar_height: 28,
+            vertical_tab_width: 28,
             tab_font: "monospace".to_string(),
             tab_font_size: 11,
             show_tab_icons: true,
@@ -429,6 +436,7 @@ impl Default for KeybindingConfig {
             move_tagged_windows: Some("Mod4+a".to_string()),
             untag_all: Some("Mod4+Shift+t".to_string()),
             toggle_float: Some("Mod4+f".to_string()),
+            toggle_vertical_tabs: Some("Mod4+slash".to_string()),
             focus_urgent: Some("Mod4+space".to_string()),
             focus_monitor_left: Some("Mod4+Control+Left".to_string()),
             focus_monitor_right: Some("Mod4+Control+Right".to_string()),
