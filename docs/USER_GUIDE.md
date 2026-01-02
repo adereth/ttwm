@@ -156,7 +156,7 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 |----------|--------|
 | `Mod4+q` | Close focused window |
 | `Mod4+f` | Toggle floating mode for focused window |
-| `Mod4+Shift+q` | Quit ttwm |
+| `Mod4+Control+F4` | Quit ttwm |
 
 ### Tab Navigation
 
