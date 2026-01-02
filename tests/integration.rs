@@ -240,6 +240,29 @@ impl TestHarness {
     fn get_floating(&self) -> Result<Value, String> {
         self.send_command(&serde_json::json!({"command": "get_floating"}))
     }
+
+    /// Switch to next workspace
+    fn workspace_next(&self) -> Result<Value, String> {
+        self.send_command(&serde_json::json!({"command": "workspace_next"}))
+    }
+
+    /// Switch to previous workspace
+    fn workspace_prev(&self) -> Result<Value, String> {
+        self.send_command(&serde_json::json!({"command": "workspace_prev"}))
+    }
+
+    /// Switch to a specific workspace (0-indexed)
+    fn switch_workspace(&self, index: usize) -> Result<Value, String> {
+        self.send_command(&serde_json::json!({
+            "command": "switch_workspace",
+            "index": index
+        }))
+    }
+
+    /// Get current workspace index
+    fn get_current_workspace(&self) -> Result<Value, String> {
+        self.send_command(&serde_json::json!({"command": "get_current_workspace"}))
+    }
 }
 
 impl Drop for TestHarness {
@@ -950,4 +973,149 @@ fn test_windows_list_includes_is_floating_field() {
 
     // Note: We can't fully test is_floating without spawning windows,
     // but we've verified the IPC structure is correct
+}
+
+// =============================================================================
+// Workspace Switching Tests
+// =============================================================================
+
+#[test]
+fn test_workspace_switch_basic() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Should start on workspace 0
+    let result = harness.get_current_workspace().expect("Failed to get workspace");
+    assert_eq!(result.get("workspace").and_then(|v| v.as_u64()), Some(0));
+
+    // Switch to next workspace
+    let result = harness.workspace_next().expect("Failed to switch workspace");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+    // Should now be on workspace 1
+    let result = harness.get_current_workspace().expect("Failed to get workspace");
+    assert_eq!(result.get("workspace").and_then(|v| v.as_u64()), Some(1));
+
+    // Switch back to previous workspace
+    let result = harness.workspace_prev().expect("Failed to switch workspace");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+    // Should be back on workspace 0
+    let result = harness.get_current_workspace().expect("Failed to get workspace");
+    assert_eq!(result.get("workspace").and_then(|v| v.as_u64()), Some(0));
+
+    // State should be valid
+    let result = harness.validate().expect("Failed to validate");
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn test_workspace_switch_with_empty_frames() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Create multiple empty frames via splits
+    harness.split("horizontal").expect("Failed to split horizontal");
+    harness.split("vertical").expect("Failed to split vertical");
+
+    // Verify we have a split layout with multiple frames
+    let layout = harness.get_layout().expect("Failed to get layout");
+    let layout_data = layout.get("layout").expect("Missing layout");
+    assert_eq!(
+        layout_data.get("type").and_then(|v| v.as_str()),
+        Some("split"),
+        "Should have split layout"
+    );
+
+    // State should be valid before switch
+    let result = harness.validate().expect("Failed to validate");
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+
+    // Switch to workspace 2
+    let result = harness.switch_workspace(2).expect("Failed to switch workspace");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+    // Verify we're on workspace 2
+    let result = harness.get_current_workspace().expect("Failed to get workspace");
+    assert_eq!(result.get("workspace").and_then(|v| v.as_u64()), Some(2));
+
+    // Workspace 2 should have default single-frame layout
+    let layout = harness.get_layout().expect("Failed to get layout");
+    let layout_data = layout.get("layout").expect("Missing layout");
+    assert_eq!(
+        layout_data.get("type").and_then(|v| v.as_str()),
+        Some("frame"),
+        "New workspace should have single frame"
+    );
+
+    // State should be valid
+    let result = harness.validate().expect("Failed to validate");
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+
+    // Switch back to workspace 0
+    let result = harness.switch_workspace(0).expect("Failed to switch workspace");
+    assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+    // Verify layout is preserved (should still be split)
+    let layout = harness.get_layout().expect("Failed to get layout");
+    let layout_data = layout.get("layout").expect("Missing layout");
+    assert_eq!(
+        layout_data.get("type").and_then(|v| v.as_str()),
+        Some("split"),
+        "Original workspace should preserve split layout"
+    );
+
+    // State should be valid after switch back
+    let result = harness.validate().expect("Failed to validate");
+    assert_eq!(result.get("valid").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn test_workspace_switch_multiple_times_with_empty_frames() {
+    let Some(harness) = TestHarness::new() else {
+        eprintln!("Skipping test: could not create test harness");
+        return;
+    };
+
+    // Create 3 empty frames on workspace 0
+    harness.split("horizontal").expect("Failed to split");
+    harness.split("horizontal").expect("Failed to split");
+
+    // Switch back and forth multiple times
+    for i in 0..5 {
+        // Switch to workspace 1
+        harness.workspace_next().expect("Failed to switch to next");
+
+        // Validate state
+        let result = harness.validate().expect("Failed to validate");
+        assert_eq!(
+            result.get("valid").and_then(|v| v.as_bool()),
+            Some(true),
+            "State should be valid after switch {} to workspace 1", i
+        );
+
+        // Switch back to workspace 0
+        harness.workspace_prev().expect("Failed to switch to prev");
+
+        // Validate state
+        let result = harness.validate().expect("Failed to validate");
+        assert_eq!(
+            result.get("valid").and_then(|v| v.as_bool()),
+            Some(true),
+            "State should be valid after switch {} back to workspace 0", i
+        );
+    }
+
+    // Final layout should still have splits
+    let layout = harness.get_layout().expect("Failed to get layout");
+    let layout_data = layout.get("layout").expect("Missing layout");
+    assert_eq!(
+        layout_data.get("type").and_then(|v| v.as_str()),
+        Some("split"),
+        "Layout should still be split after multiple workspace switches"
+    );
 }
