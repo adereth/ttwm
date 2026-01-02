@@ -87,6 +87,7 @@ impl Workspace {
 }
 
 /// Manages multiple workspaces (virtual desktops)
+#[derive(Debug)]
 pub struct WorkspaceManager {
     /// All workspaces (fixed array of 9)
     pub workspaces: [Workspace; NUM_WORKSPACES],

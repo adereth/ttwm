@@ -63,6 +63,21 @@ When a window becomes urgent:
 
 Urgent windows are handled in FIFO order (first-in, first-out), so `Mod4+Space` always focuses the window that has been waiting longest for attention.
 
+### Multi-Monitor Support
+
+ttwm supports **multiple monitors** with per-monitor workspaces (similar to i3/bspwm). Each monitor maintains its own independent set of 9 workspaces.
+
+**Key features:**
+- Each monitor has its own 9 workspaces
+- Workspace switching only affects the currently focused monitor
+- Use `Mod4+Control+Left/Right` to move focus between monitors
+- Drag tabs to frames on other monitors to move windows
+- Use tagging (`Mod4+t`) to batch-move windows between monitors
+
+**Monitor detection:**
+- Monitors are detected via RandR at startup
+- RandR hotplug events are supported (connect/disconnect monitors)
+
 ---
 
 ## Installation
@@ -209,6 +224,13 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 |----------|--------|
 | `Mod4+Space` | Focus oldest urgent window (jumps to other workspace if needed) |
 
+### Monitor Navigation
+
+| Shortcut | Action |
+|----------|--------|
+| `Mod4+Control+Left` | Focus monitor to the left |
+| `Mod4+Control+Right` | Focus monitor to the right |
+
 ---
 
 ## Mouse Interactions
@@ -328,6 +350,7 @@ All available keybinding options:
 - `close_window`, `toggle_float`, `quit`
 - `workspace_next`, `workspace_prev`
 - `tag_window`, `move_tagged_windows`, `untag_all`
+- `focus_monitor_left`, `focus_monitor_right`
 
 ### Exec Settings
 
@@ -421,6 +444,13 @@ ttwmctl workspace prev         # Switch to previous workspace
 ttwmctl current-workspace      # Get current workspace number
 ttwmctl move-to-workspace 2    # Move focused window to workspace 2
 ttwmctl move-to-workspace 2 --window 0x1c00004  # Move specific window
+
+# Monitor commands
+ttwmctl monitors               # List all monitors with geometry and state
+ttwmctl current-monitor        # Get currently focused monitor name
+ttwmctl focus-monitor DP-1     # Focus a specific monitor by name
+ttwmctl focus-monitor left     # Focus monitor to the left
+ttwmctl focus-monitor right    # Focus monitor to the right
 
 # Validate WM state (for debugging)
 ttwmctl validate

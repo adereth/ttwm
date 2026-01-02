@@ -183,6 +183,18 @@ enum Commands {
         window: Option<String>,
     },
 
+    /// Get list of all monitors
+    Monitors,
+
+    /// Get currently focused monitor
+    CurrentMonitor,
+
+    /// Focus a monitor by name or direction (left/right)
+    FocusMonitor {
+        /// Monitor name (e.g., "DP-1") or direction ("left", "right")
+        target: String,
+    },
+
     /// Capture a screenshot
     Screenshot {
         /// Path to save the screenshot
@@ -286,6 +298,11 @@ fn main() {
                 "workspace": workspace - 1,
                 "window": window_id
             })
+        }
+        Commands::Monitors => serde_json::json!({"command": "get_monitors"}),
+        Commands::CurrentMonitor => serde_json::json!({"command": "get_current_monitor"}),
+        Commands::FocusMonitor { target } => {
+            serde_json::json!({"command": "focus_monitor", "target": target})
         }
         Commands::Screenshot { path } => {
             serde_json::json!({"command": "screenshot", "path": path.to_string_lossy()})

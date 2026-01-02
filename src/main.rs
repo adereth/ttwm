@@ -8,6 +8,7 @@ mod config;
 mod ewmh;
 mod ipc;
 mod layout;
+mod monitor;
 mod render;
 mod state;
 mod tracing;
@@ -28,6 +29,7 @@ use config::{parse_color, Config, ParsedBinding, WmAction};
 use ewmh::Atoms;
 use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
 use layout::{Direction, NodeId, Rect, SplitDirection};
+use monitor::{MonitorId, MonitorManager};
 use workspaces::{WorkspaceManager, NUM_WORKSPACES};
 use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color, darken_color};
 use state::{StateTransition, UnmanageReason};
@@ -161,16 +163,16 @@ struct Wm {
     screen_num: usize,
     root: Window,
     atoms: Atoms,
-    /// Workspaces (virtual desktops) - each has its own layout tree
-    workspaces: WorkspaceManager,
+    /// Multi-monitor support - each monitor has its own workspaces
+    monitors: MonitorManager,
     /// Currently focused window (if any)
     focused_window: Option<Window>,
     /// WM check window for EWMH
     check_window: Window,
     /// Layout configuration
     config: LayoutConfig,
-    /// Tab bar windows for each frame ((workspace_idx, NodeId) -> Window)
-    tab_bar_windows: HashMap<(usize, NodeId), Window>,
+    /// Tab bar windows for each frame ((monitor_id, workspace_idx, NodeId) -> Window)
+    tab_bar_windows: HashMap<(MonitorId, usize, NodeId), Window>,
     /// Windows we've intentionally unmapped (hidden tabs) - don't unmanage on UnmapNotify
     hidden_windows: std::collections::HashSet<Window>,
     /// Graphics context for drawing
@@ -318,12 +320,27 @@ impl Wm {
 
         conn.close_font(cursor_font)?;
 
+        // Initialize monitor manager with RandR
+        use x11rb::protocol::randr;
+
+        // Select RandR events for hotplug detection
+        randr::select_input(
+            &conn,
+            root,
+            randr::NotifyMask::SCREEN_CHANGE | randr::NotifyMask::OUTPUT_CHANGE,
+        )?;
+        conn.flush()?;
+
+        let mut monitors = MonitorManager::new();
+        monitors.refresh(&conn, root)?;
+        log::info!("Initialized {} monitor(s)", monitors.count());
+
         Ok(Self {
             conn,
             screen_num,
             root,
             atoms,
-            workspaces: WorkspaceManager::new(),
+            monitors,
             focused_window: None,
             check_window,
             config,
@@ -350,6 +367,16 @@ impl Wm {
     /// Get screen info
     fn screen(&self) -> &Screen {
         &self.conn.setup().roots[self.screen_num]
+    }
+
+    /// Get the workspace manager for the focused monitor
+    fn workspaces(&self) -> &WorkspaceManager {
+        &self.monitors.focused().workspaces
+    }
+
+    /// Get the workspace manager for the focused monitor (mutable)
+    fn workspaces_mut(&mut self) -> &mut WorkspaceManager {
+        &mut self.monitors.focused_mut().workspaces
     }
 
     /// Become the window manager by requesting SubstructureRedirect on root
@@ -478,7 +505,7 @@ impl Wm {
             self.root,
             self.atoms.net_current_desktop,
             AtomEnum::CARDINAL,
-            &[self.workspaces.current_index() as u32],
+            &[self.workspaces().current_index() as u32],
         )?;
         self.conn.flush()?;
         Ok(())
@@ -498,14 +525,14 @@ impl Wm {
 
     /// Switch to the next workspace
     fn workspace_next(&mut self) -> Result<()> {
-        let old_idx = self.workspaces.next();
+        let old_idx = self.workspaces_mut().next();
         self.perform_workspace_switch(old_idx)?;
         Ok(())
     }
 
     /// Switch to the previous workspace
     fn workspace_prev(&mut self) -> Result<()> {
-        let old_idx = self.workspaces.prev();
+        let old_idx = self.workspaces_mut().prev();
         self.perform_workspace_switch(old_idx)?;
         Ok(())
     }
@@ -527,15 +554,15 @@ impl Wm {
 
     /// Move all tagged windows to the currently focused frame and untag them
     fn move_tagged_to_focused_frame(&mut self) -> Result<()> {
-        let target_frame = self.workspaces.current().layout.focused;
+        let target_frame = self.workspaces().current().layout.focused;
         let tagged: Vec<Window> = self.tagged_windows.iter().copied().collect();
         let count = tagged.len();
 
         let mut last_moved: Option<Window> = None;
         for window in tagged {
-            if let Some(source_frame) = self.workspaces.current_mut().layout.find_window(window) {
+            if let Some(source_frame) = self.workspaces_mut().current_mut().layout.find_window(window) {
                 if source_frame != target_frame {
-                    self.workspaces.current_mut().layout.move_window_to_frame(
+                    self.workspaces_mut().current_mut().layout.move_window_to_frame(
                         window,
                         source_frame,
                         target_frame,
@@ -569,37 +596,41 @@ impl Wm {
 
     /// Perform the workspace switch after index has been changed
     fn perform_workspace_switch(&mut self, old_idx: usize) -> Result<()> {
-        let new_idx = self.workspaces.current_index();
+        let new_idx = self.workspaces().current_index();
         log::info!("Switching from workspace {} to workspace {}", old_idx + 1, new_idx + 1);
 
         // Save current workspace's focused window
-        self.workspaces.workspaces[old_idx].last_focused_window = self.focused_window;
+        self.monitors.focused_mut().workspaces.workspaces[old_idx].last_focused_window = self.focused_window;
 
         // Hide all tiled windows from old workspace
-        for window in self.workspaces.workspaces[old_idx].layout.all_windows() {
+        for window in self.monitors.focused_mut().workspaces.workspaces[old_idx].layout.all_windows() {
             self.hidden_windows.insert(window);
             self.conn.unmap_window(window)?;
         }
 
         // Hide all floating windows from old workspace
-        for floating in &self.workspaces.workspaces[old_idx].floating_windows {
+        for floating in &self.monitors.focused_mut().workspaces.workspaces[old_idx].floating_windows {
             self.hidden_windows.insert(floating.window);
             self.conn.unmap_window(floating.window)?;
         }
 
-        // Hide tab bars from old workspace
-        for (&(ws_idx, _), &tab_window) in &self.tab_bar_windows {
-            if ws_idx == old_idx {
+        // Hide tab bars from old workspace (on focused monitor)
+        let mon_id = self.monitors.focused_id();
+        for (&(m_id, ws_idx, _), &tab_window) in &self.tab_bar_windows {
+            if m_id == mon_id && ws_idx == old_idx {
                 self.conn.unmap_window(tab_window)?;
             }
         }
 
         // Show windows from new workspace (remove from hidden set)
-        for window in self.workspaces.current().layout.all_windows() {
+        // Collect window IDs first to avoid borrow conflicts
+        let tiled_windows = self.workspaces().current().layout.all_windows();
+        let floating_windows = self.workspaces().current().floating_window_ids();
+        for window in tiled_windows {
             self.hidden_windows.remove(&window);
         }
-        for floating in &self.workspaces.current().floating_windows {
-            self.hidden_windows.remove(&floating.window);
+        for window in floating_windows {
+            self.hidden_windows.remove(&window);
         }
 
         // Clear focused window (will be restored below)
@@ -609,10 +640,10 @@ impl Wm {
         self.apply_layout()?;
 
         // Restore focus to last focused window in new workspace
-        if let Some(w) = self.workspaces.current().last_focused_window {
+        if let Some(w) = self.workspaces().current().last_focused_window {
             // Check if window exists (either tiled or floating)
-            let is_tiled = self.workspaces.current().layout.find_window(w).is_some();
-            let is_floating = self.workspaces.current().is_floating(w);
+            let is_tiled = self.workspaces().current().layout.find_window(w).is_some();
+            let is_floating = self.workspaces().current().is_floating(w);
             if is_tiled || is_floating {
                 self.focus_window(w)?;
             }
@@ -635,11 +666,11 @@ impl Wm {
 
     /// Update _NET_CLIENT_LIST with current windows (from all workspaces)
     fn update_client_list(&self) -> Result<()> {
-        let mut windows: Vec<Window> = self.workspaces.workspaces.iter()
+        let mut windows: Vec<Window> = self.monitors.focused().workspaces.workspaces.iter()
             .flat_map(|ws| ws.layout.all_windows())
             .collect();
         // Also include floating windows
-        for ws in &self.workspaces.workspaces {
+        for ws in &self.monitors.focused().workspaces.workspaces {
             windows.extend(ws.floating_window_ids());
         }
         self.conn.change_property32(
@@ -665,22 +696,38 @@ impl Wm {
         Ok(())
     }
 
-    /// Get the usable screen area (with outer gaps)
+    /// Get the usable screen area for the focused monitor (with outer gaps)
     fn usable_screen(&self) -> Rect {
-        let screen = self.screen();
+        self.usable_area(self.monitors.focused_id())
+    }
+
+    /// Get the usable area for a specific monitor (with outer gaps)
+    fn usable_area(&self, monitor_id: MonitorId) -> Rect {
         let gap = self.config.outer_gap;
-        Rect::new(
-            gap as i32,
-            gap as i32,
-            (screen.width_in_pixels as u32).saturating_sub(gap * 2),
-            (screen.height_in_pixels as u32).saturating_sub(gap * 2),
-        )
+        if let Some(monitor) = self.monitors.get(monitor_id) {
+            Rect::new(
+                monitor.geometry.x + gap as i32,
+                monitor.geometry.y + gap as i32,
+                monitor.geometry.width.saturating_sub(gap * 2),
+                monitor.geometry.height.saturating_sub(gap * 2),
+            )
+        } else {
+            // Fallback to full screen if monitor not found
+            let screen = self.screen();
+            Rect::new(
+                gap as i32,
+                gap as i32,
+                (screen.width_in_pixels as u32).saturating_sub(gap * 2),
+                (screen.height_in_pixels as u32).saturating_sub(gap * 2),
+            )
+        }
     }
 
     /// Get or create a tab bar window for a frame
     fn get_or_create_tab_bar(&mut self, frame_id: NodeId, rect: &Rect) -> Result<Window> {
-        let ws_idx = self.workspaces.current_index();
-        let key = (ws_idx, frame_id);
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
+        let key = (mon_id, ws_idx, frame_id);
 
         if let Some(&window) = self.tab_bar_windows.get(&key) {
             // Update position and size
@@ -728,7 +775,7 @@ impl Wm {
         const ICON_SIZE: u32 = 20;
         const ICON_PADDING: u32 = 4;  // Padding after icon
 
-        let frame = match self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+        let frame = match self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
             Some(f) => f,
             None => return Vec::new(),
         };
@@ -1077,7 +1124,7 @@ impl Wm {
     fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
         // Extract all needed data from frame before any mutable calls
         let (windows, focused_tab, is_empty) = {
-            let frame = match self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+            let frame = match self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
                 Some(f) => f,
                 None => return Ok(()),
             };
@@ -1089,7 +1136,7 @@ impl Wm {
 
         // Empty frame - show focus indicator if focused
         if is_empty {
-            let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
+            let is_focused_frame = frame_id == self.workspaces().current().layout.focused;
             if is_focused_frame {
                 self.draw_empty_frame_indicator(window, rect)?;
             }
@@ -1100,7 +1147,7 @@ impl Wm {
         let tab_layout = self.calculate_tab_layout(frame_id);
 
         // Check if this frame is the focused frame
-        let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
+        let is_focused_frame = frame_id == self.workspaces().current().layout.focused;
         let show_icons = self.config.show_tab_icons;
         let num_tabs = windows.len();
 
@@ -1279,15 +1326,16 @@ impl Wm {
 
     /// Redraw tab bars that contain a specific window (used when icon changes)
     fn redraw_tabs_for_window(&mut self, window: Window) -> Result<()> {
-        let ws_idx = self.workspaces.current_index();
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
 
         // Find the frame containing this window
-        if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
+        if let Some(frame_id) = self.workspaces().current().layout.find_window(window) {
             // Get tab bar window for this frame
-            if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, frame_id)) {
+            if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
                 // Get frame geometry
                 let screen_rect = self.usable_screen();
-                let geometries = self.workspaces.current().layout.calculate_geometries(
+                let geometries = self.workspaces().current().layout.calculate_geometries(
                     screen_rect,
                     self.config.gap,
                 );
@@ -1304,11 +1352,12 @@ impl Wm {
 
     /// Remove tab bar windows for frames that no longer exist
     fn cleanup_tab_bars(&mut self) {
-        let ws_idx = self.workspaces.current_index();
-        let valid_frames: std::collections::HashSet<_> = self.workspaces.current().layout.all_frames().into_iter().collect();
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
+        let valid_frames: std::collections::HashSet<_> = self.workspaces().current().layout.all_frames().into_iter().collect();
         let to_remove: Vec<_> = self.tab_bar_windows
             .keys()
-            .filter(|(idx, frame_id)| *idx == ws_idx && !valid_frames.contains(frame_id))
+            .filter(|(m_id, idx, frame_id)| *m_id == mon_id && *idx == ws_idx && !valid_frames.contains(frame_id))
             .copied()
             .collect();
 
@@ -1324,63 +1373,82 @@ impl Wm {
     /// Apply the current layout to all windows
     fn apply_layout(&mut self) -> Result<()> {
         let screen_rect = self.usable_screen();
-        let geometries = self.workspaces.current().layout.calculate_geometries(screen_rect, self.config.gap);
+        let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
 
         // Collect frame info for tab bar management
         let mut frames_with_tabs: Vec<(NodeId, Rect, usize)> = Vec::new();
 
-        for (frame_id, rect) in &geometries {
-            if let Some(frame) = self.workspaces.current().layout.get(*frame_id).and_then(|n| n.as_frame()) {
-                let border = self.config.border_width;
-                let tab_bar_height = self.config.tab_bar_height;
+        // Collect frame data upfront to avoid borrow conflicts
+        struct FrameData {
+            frame_id: NodeId,
+            rect: Rect,
+            windows: Vec<Window>,
+            focused_idx: usize,
+        }
+        let frame_data: Vec<FrameData> = geometries.iter()
+            .filter_map(|(frame_id, rect)| {
+                self.workspaces().current().layout.get(*frame_id)
+                    .and_then(|n| n.as_frame())
+                    .map(|frame| FrameData {
+                        frame_id: *frame_id,
+                        rect: rect.clone(),
+                        windows: frame.windows.clone(),
+                        focused_idx: frame.focused,
+                    })
+            })
+            .collect();
 
-                // Calculate client area (below tab bar)
-                // Always show tab bar, even for empty frames (to allow middle-click removal)
-                let has_tabs = true;
-                let client_y = if has_tabs {
-                    rect.y + tab_bar_height as i32
-                } else {
-                    rect.y
-                };
-                let client_height = if has_tabs {
-                    rect.height.saturating_sub(tab_bar_height)
-                } else {
-                    rect.height
-                };
+        let border = self.config.border_width;
+        let tab_bar_height = self.config.tab_bar_height;
 
-                if has_tabs {
-                    log::debug!("Frame {:?} has {} windows, will show tab bar", frame_id, frame.windows.len());
-                    frames_with_tabs.push((*frame_id, rect.clone(), frame.windows.len()));
-                } else {
-                    // Hide tab bar for single-window frames
-                    let ws_idx = self.workspaces.current_index();
-                    if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, *frame_id)) {
-                        self.conn.unmap_window(tab_window)?;
-                    }
+        for fd in &frame_data {
+            // Calculate client area (below tab bar)
+            // Always show tab bar, even for empty frames (to allow middle-click removal)
+            let has_tabs = true;
+            let client_y = if has_tabs {
+                fd.rect.y + tab_bar_height as i32
+            } else {
+                fd.rect.y
+            };
+            let client_height = if has_tabs {
+                fd.rect.height.saturating_sub(tab_bar_height)
+            } else {
+                fd.rect.height
+            };
+
+            if has_tabs {
+                log::debug!("Frame {:?} has {} windows, will show tab bar", fd.frame_id, fd.windows.len());
+                frames_with_tabs.push((fd.frame_id, fd.rect.clone(), fd.windows.len()));
+            } else {
+                // Hide tab bar for single-window frames
+                let mon_id = self.monitors.focused_id();
+                let ws_idx = self.workspaces().current_index();
+                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, fd.frame_id)) {
+                    self.conn.unmap_window(tab_window)?;
                 }
+            }
 
-                // Only show the focused window, unmap others
-                for (i, &window) in frame.windows.iter().enumerate() {
-                    if i == frame.focused {
-                        // Configure and map the focused window
-                        self.conn.configure_window(
-                            window,
-                            &ConfigureWindowAux::new()
-                                .x(rect.x)
-                                .y(client_y)
-                                .width(rect.width.saturating_sub(border * 2))
-                                .height(client_height.saturating_sub(border * 2))
-                                .border_width(border),
-                        )?;
-                        self.conn.map_window(window)?;
-                        // Remove from hidden set since it's now visible
-                        self.hidden_windows.remove(&window);
-                    } else {
-                        // Unmap non-focused windows (tabs)
-                        // Track that we intentionally hid this window
-                        self.hidden_windows.insert(window);
-                        self.conn.unmap_window(window)?;
-                    }
+            // Only show the focused window, unmap others
+            for (i, &window) in fd.windows.iter().enumerate() {
+                if i == fd.focused_idx {
+                    // Configure and map the focused window
+                    self.conn.configure_window(
+                        window,
+                        &ConfigureWindowAux::new()
+                            .x(fd.rect.x)
+                            .y(client_y)
+                            .width(fd.rect.width.saturating_sub(border * 2))
+                            .height(client_height.saturating_sub(border * 2))
+                            .border_width(border),
+                    )?;
+                    self.conn.map_window(window)?;
+                    // Remove from hidden set since it's now visible
+                    self.hidden_windows.remove(&window);
+                } else {
+                    // Unmap non-focused windows (tabs)
+                    // Track that we intentionally hid this window
+                    self.hidden_windows.insert(window);
+                    self.conn.unmap_window(window)?;
                 }
             }
         }
@@ -1414,7 +1482,7 @@ impl Wm {
         let border = self.config.border_width;
 
         // Get floating windows for current workspace
-        let floating_windows: Vec<_> = self.workspaces.current()
+        let floating_windows: Vec<_> = self.workspaces().current()
             .floating_windows
             .iter()
             .map(|f| (f.window, f.x, f.y, f.width, f.height))
@@ -1582,7 +1650,7 @@ impl Wm {
 
     /// Check if a window is currently floating
     fn is_floating(&self, window: Window) -> bool {
-        self.workspaces.current().is_floating(window)
+        self.workspaces().current().is_floating(window)
     }
 
     /// Check if a window has the urgent hint set via _NET_WM_STATE or WM_HINTS
@@ -1647,7 +1715,7 @@ impl Wm {
 
     /// Find which workspace contains a window (including floating)
     fn find_window_workspace(&self, window: Window) -> Option<usize> {
-        for (idx, ws) in self.workspaces.workspaces.iter().enumerate() {
+        for (idx, ws) in self.monitors.focused().workspaces.workspaces.iter().enumerate() {
             // Check floating windows
             if ws.is_floating(window) {
                 return Some(idx);
@@ -1662,7 +1730,7 @@ impl Wm {
 
     /// Update the urgent indicator visibility based on urgent windows on other workspaces
     fn update_urgent_indicator(&mut self) -> Result<()> {
-        let current_ws = self.workspaces.current_index();
+        let current_ws = self.workspaces().current_index();
         let has_other_ws_urgent = self.urgent_windows.iter().any(|&w| {
             self.find_window_workspace(w) != Some(current_ws)
         });
@@ -1737,7 +1805,7 @@ impl Wm {
             // Find which workspace contains this window
             if let Some(workspace_idx) = self.find_window_workspace(window) {
                 // Switch to that workspace if needed
-                if let Some(old_idx) = self.workspaces.switch_to(workspace_idx) {
+                if let Some(old_idx) = self.workspaces_mut().switch_to(workspace_idx) {
                     self.perform_workspace_switch(old_idx)?;
                 }
                 // Focus the window (which will clear its urgent state)
@@ -1751,10 +1819,10 @@ impl Wm {
     /// Start managing a window
     fn manage_window(&mut self, window: Window) -> Result<()> {
         // Check if already managed (either tiled or floating)
-        if self.workspaces.current().layout.find_window(window).is_some() {
+        if self.workspaces().current().layout.find_window(window).is_some() {
             return Ok(());
         }
-        if self.workspaces.current().is_floating(window) {
+        if self.workspaces().current().is_floating(window) {
             return Ok(());
         }
 
@@ -1794,7 +1862,7 @@ impl Wm {
             };
 
             // Add to floating windows
-            self.workspaces.current_mut().add_floating(
+            self.workspaces_mut().current_mut().add_floating(
                 window,
                 x,
                 y,
@@ -1814,10 +1882,10 @@ impl Wm {
             });
         } else {
             // Add to the focused frame in our layout (tiled)
-            self.workspaces.current_mut().layout.add_window(window);
+            self.workspaces_mut().current_mut().layout.add_window(window);
 
             // Trace the window being managed
-            if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
+            if let Some(frame_id) = self.workspaces().current().layout.find_window(window) {
                 self.tracer.trace_transition(&StateTransition::WindowManaged {
                     window,
                     frame: format!("{:?}", frame_id),
@@ -1863,13 +1931,13 @@ impl Wm {
         }
 
         // Check if this is a floating window
-        if self.workspaces.current().is_floating(window) {
+        if self.workspaces().current().is_floating(window) {
             self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
                 window,
                 reason: UnmanageReason::ClientDestroyed,
             });
 
-            self.workspaces.current_mut().remove_floating(window);
+            self.workspaces_mut().current_mut().remove_floating(window);
             log::info!("Unmanaging floating window 0x{:x}", window);
 
             // Update EWMH client list
@@ -1887,14 +1955,14 @@ impl Wm {
         }
 
         // Trace before removing (tiled window)
-        if self.workspaces.current().layout.find_window(window).is_some() {
+        if self.workspaces().current().layout.find_window(window).is_some() {
             self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
                 window,
                 reason: UnmanageReason::ClientDestroyed,
             });
         }
 
-        if let Some(_frame_id) = self.workspaces.current_mut().layout.remove_window(window) {
+        if let Some(_frame_id) = self.workspaces_mut().current_mut().layout.remove_window(window) {
             log::info!("Unmanaging window 0x{:x}", window);
 
             // Update EWMH client list
@@ -1916,20 +1984,20 @@ impl Wm {
     /// Focus the next available window (floating or tiled)
     fn focus_next_available_window(&mut self) -> Result<()> {
         // First try floating windows
-        let floating_windows = self.workspaces.current().floating_window_ids();
+        let floating_windows = self.workspaces().current().floating_window_ids();
         if let Some(&w) = floating_windows.first() {
             return self.focus_window(w);
         }
 
         // Try to focus the window in the focused frame
-        if let Some(frame) = self.workspaces.current().layout.focused_frame() {
+        if let Some(frame) = self.workspaces().current().layout.focused_frame() {
             if let Some(w) = frame.focused_window() {
                 return self.focus_window(w);
             }
         }
 
         // If still no focus, try any tiled window
-        let windows = self.workspaces.current().layout.all_windows();
+        let windows = self.workspaces().current().layout.all_windows();
         if let Some(&w) = windows.first() {
             self.focus_window(w)?;
         } else {
@@ -1950,16 +2018,16 @@ impl Wm {
             }
         };
 
-        if self.workspaces.current().is_floating(window) {
+        if self.workspaces().current().is_floating(window) {
             // Currently floating -> make it tiled
-            if let Some(float_info) = self.workspaces.current_mut().remove_floating(window) {
+            if let Some(float_info) = self.workspaces_mut().current_mut().remove_floating(window) {
                 log::info!(
                     "Tiling floating window 0x{:x} (was at {}, {} {}x{})",
                     window, float_info.x, float_info.y, float_info.width, float_info.height
                 );
 
                 // Add to the focused frame in the layout
-                self.workspaces.current_mut().layout.add_window(window);
+                self.workspaces_mut().current_mut().layout.add_window(window);
 
                 // Apply layout and focus
                 self.apply_layout()?;
@@ -1971,14 +2039,14 @@ impl Wm {
             let geom = self.conn.get_geometry(window)?.reply()?;
 
             // Remove from tiled layout
-            if let Some(_frame_id) = self.workspaces.current_mut().layout.remove_window(window) {
+            if let Some(_frame_id) = self.workspaces_mut().current_mut().layout.remove_window(window) {
                 log::info!(
                     "Floating window 0x{:x} at ({}, {}) {}x{}",
                     window, geom.x, geom.y, geom.width, geom.height
                 );
 
                 // Add to floating windows with current geometry
-                self.workspaces.current_mut().add_floating(
+                self.workspaces_mut().current_mut().add_floating(
                     window,
                     geom.x as i32,
                     geom.y as i32,
@@ -1998,8 +2066,8 @@ impl Wm {
     /// Cycle focus to the next/previous window (across all frames and floating windows)
     fn cycle_focus(&mut self, forward: bool) -> Result<()> {
         // Build a list of all windows: tiled first, then floating
-        let mut windows = self.workspaces.current().layout.all_windows();
-        windows.extend(self.workspaces.current().floating_window_ids());
+        let mut windows = self.workspaces().current().layout.all_windows();
+        windows.extend(self.workspaces().current().floating_window_ids());
 
         if windows.is_empty() {
             return Ok(());
@@ -2028,13 +2096,13 @@ impl Wm {
     /// Cycle tabs within the focused frame
     fn cycle_tab(&mut self, forward: bool) -> Result<()> {
         // Capture old tab index for tracing
-        let old_tab = self.workspaces.current().layout.focused_frame().map(|f| f.focused);
+        let old_tab = self.workspaces().current().layout.focused_frame().map(|f| f.focused);
 
-        if let Some(window) = self.workspaces.current_mut().layout.cycle_tab(forward) {
+        if let Some(window) = self.workspaces_mut().current_mut().layout.cycle_tab(forward) {
             // Trace the tab switch
-            if let (Some(old), Some(frame)) = (old_tab, self.workspaces.current().layout.focused_frame()) {
+            if let (Some(old), Some(frame)) = (old_tab, self.workspaces().current().layout.focused_frame()) {
                 self.tracer.trace_transition(&StateTransition::TabSwitched {
-                    frame: format!("{:?}", self.workspaces.current().layout.focused),
+                    frame: format!("{:?}", self.workspaces().current().layout.focused),
                     from: old,
                     to: frame.focused,
                 });
@@ -2050,14 +2118,14 @@ impl Wm {
     /// Focus a specific tab by number (1-based for user, 0-based internally)
     fn focus_tab(&mut self, num: usize) -> Result<()> {
         // Capture old tab index for tracing
-        let old_tab = self.workspaces.current().layout.focused_frame().map(|f| f.focused);
+        let old_tab = self.workspaces().current().layout.focused_frame().map(|f| f.focused);
 
-        if let Some(window) = self.workspaces.current_mut().layout.focus_tab(num.saturating_sub(1)) {
+        if let Some(window) = self.workspaces_mut().current_mut().layout.focus_tab(num.saturating_sub(1)) {
             // Trace the tab switch
-            if let (Some(old), Some(frame)) = (old_tab, self.workspaces.current().layout.focused_frame()) {
+            if let (Some(old), Some(frame)) = (old_tab, self.workspaces().current().layout.focused_frame()) {
                 if old != frame.focused {
                     self.tracer.trace_transition(&StateTransition::TabSwitched {
-                        frame: format!("{:?}", self.workspaces.current().layout.focused),
+                        frame: format!("{:?}", self.workspaces().current().layout.focused),
                         from: old,
                         to: frame.focused,
                     });
@@ -2073,9 +2141,9 @@ impl Wm {
 
     /// Split the focused frame
     fn split_focused(&mut self, direction: SplitDirection) -> Result<()> {
-        let old_frame = self.workspaces.current().layout.focused;
-        self.workspaces.current_mut().layout.split_focused(direction);
-        let new_frame = self.workspaces.current().layout.focused;
+        let old_frame = self.workspaces().current().layout.focused;
+        self.workspaces_mut().current_mut().layout.split_focused(direction);
+        let new_frame = self.workspaces().current().layout.focused;
 
         // Trace the split
         self.tracer.trace_transition(&StateTransition::FrameSplit {
@@ -2091,15 +2159,15 @@ impl Wm {
 
     /// Focus frame in the given spatial direction
     fn focus_frame(&mut self, direction: Direction) -> Result<()> {
-        let old_focused_frame = self.workspaces.current().layout.focused;
+        let old_focused_frame = self.workspaces().current().layout.focused;
         let screen_rect = self.usable_screen();
-        let geometries = self.workspaces.current().layout.calculate_geometries(screen_rect, self.config.gap);
+        let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
 
-        if self.workspaces.current_mut().layout.focus_spatial(direction, &geometries) {
-            let new_focused_frame = self.workspaces.current().layout.focused;
+        if self.workspaces_mut().current_mut().layout.focus_spatial(direction, &geometries) {
+            let new_focused_frame = self.workspaces().current().layout.focused;
 
             // Focus the window in the new frame
-            if let Some(frame) = self.workspaces.current().layout.focused_frame() {
+            if let Some(frame) = self.workspaces().current().layout.focused_frame() {
                 if let Some(window) = frame.focused_window() {
                     self.focus_window(window)?;
                 }
@@ -2108,14 +2176,15 @@ impl Wm {
             // Redraw tab bars for old and new focused frames
             if old_focused_frame != new_focused_frame {
                 let geometry_map: std::collections::HashMap<_, _> = geometries.into_iter().collect();
-                let ws_idx = self.workspaces.current_index();
+                let mon_id = self.monitors.focused_id();
+                let ws_idx = self.workspaces().current_index();
 
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, old_focused_frame)) {
+                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&old_focused_frame) {
                         self.draw_tab_bar(old_focused_frame, tab_window, rect)?;
                     }
                 }
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, new_focused_frame)) {
+                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, new_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&new_focused_frame) {
                         self.draw_tab_bar(new_focused_frame, tab_window, rect)?;
                     }
@@ -2123,6 +2192,50 @@ impl Wm {
 
                 self.conn.flush()?;
             }
+        }
+        Ok(())
+    }
+
+    /// Focus a specific monitor by ID
+    fn focus_monitor(&mut self, monitor_id: MonitorId) -> Result<()> {
+        let old_monitor_id = self.monitors.focused_id();
+        if old_monitor_id == monitor_id {
+            return Ok(()); // Already focused
+        }
+
+        // Save current focused window to old monitor's workspace
+        if let Some(window) = self.focused_window {
+            self.monitors.focused_mut().workspaces.current_mut().last_focused_window = Some(window);
+        }
+
+        // Switch to new monitor
+        if !self.monitors.set_focused(monitor_id) {
+            log::warn!("Failed to focus monitor {:?} - monitor not found", monitor_id);
+            return Ok(());
+        }
+
+        log::info!("Focused monitor {:?}", monitor_id);
+
+        // Restore focus to new monitor's last focused window
+        let last_focused = self.monitors.focused().workspaces.current().last_focused_window;
+        if let Some(window) = last_focused {
+            self.focus_window(window)?;
+        } else {
+            // No last focused window - try to focus first window in current workspace
+            if let Some(frame) = self.workspaces().current().layout.focused_frame() {
+                if let Some(window) = frame.focused_window() {
+                    self.focus_window(window)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Focus monitor in the given direction
+    fn focus_monitor_direction(&mut self, direction: Direction) -> Result<()> {
+        if let Some(target_monitor) = self.monitors.monitor_in_direction(direction) {
+            self.focus_monitor(target_monitor)?;
         }
         Ok(())
     }
@@ -2136,8 +2249,8 @@ impl Wm {
         if let Some(old) = self.focused_window {
             if old != window {
                 // Check if old window is tiled or floating
-                let is_tiled = self.workspaces.current().layout.find_window(old).is_some();
-                let is_floating = self.workspaces.current().is_floating(old);
+                let is_tiled = self.workspaces().current().layout.find_window(old).is_some();
+                let is_floating = self.workspaces().current().is_floating(old);
                 if is_tiled || is_floating {
                     self.conn.change_window_attributes(
                         old,
@@ -2183,7 +2296,7 @@ impl Wm {
         }
 
         // For floating windows, just update EWMH and return
-        if self.workspaces.current().is_floating(window) {
+        if self.workspaces().current().is_floating(window) {
             log::info!("Focused floating window 0x{:x}", window);
             self.update_active_window()?;
             self.conn.flush()?;
@@ -2191,13 +2304,14 @@ impl Wm {
         }
 
         // Also update the layout's focused frame to match (for tiled windows)
-        if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
-            let old_focused_frame = self.workspaces.current().layout.focused;
-            self.workspaces.current_mut().layout.focused = frame_id;
-            let ws_idx = self.workspaces.current_index();
+        if let Some(frame_id) = self.workspaces().current().layout.find_window(window) {
+            let old_focused_frame = self.workspaces().current().layout.focused;
+            self.workspaces_mut().current_mut().layout.focused = frame_id;
+            let mon_id = self.monitors.focused_id();
+            let ws_idx = self.workspaces().current_index();
 
             // Re-raise the tab bar if this frame has one (so it stays above the window)
-            if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, frame_id)) {
+            if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
                 self.conn.configure_window(
                     tab_window,
                     &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
@@ -2206,12 +2320,12 @@ impl Wm {
 
             // Redraw tab bars (always redraw current frame, also old frame if different)
             let screen_rect = self.usable_screen();
-            let geometries = self.workspaces.current().layout.calculate_geometries(screen_rect, self.config.gap);
+            let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
             let geometry_map: std::collections::HashMap<_, _> = geometries.into_iter().collect();
 
             // Redraw old focused frame's tab bar if it changed
             if old_focused_frame != frame_id {
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, old_focused_frame)) {
+                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&old_focused_frame) {
                         self.draw_tab_bar(old_focused_frame, tab_window, rect)?;
                     }
@@ -2219,7 +2333,7 @@ impl Wm {
             }
 
             // Always redraw current frame's tab bar (new tabs, focus changes, etc.)
-            if let Some(&tab_window) = self.tab_bar_windows.get(&(ws_idx, frame_id)) {
+            if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
                 if let Some(rect) = geometry_map.get(&frame_id) {
                     self.draw_tab_bar(frame_id, tab_window, rect)?;
                 }
@@ -2303,15 +2417,15 @@ impl Wm {
             log::info!("ClientMessage: _NET_ACTIVE_WINDOW for 0x{:x}", window);
 
             // Check if window is on current workspace
-            if self.workspaces.current().layout.find_window(window).is_some() {
+            if self.workspaces().current().layout.find_window(window).is_some() {
                 self.suppress_enter_focus = true;
                 self.focus_window(window)?;
             } else {
                 // Check other workspaces and switch if found
-                for (idx, ws) in self.workspaces.workspaces.iter().enumerate() {
+                for (idx, ws) in self.monitors.focused().workspaces.workspaces.iter().enumerate() {
                     if ws.layout.find_window(window).is_some() {
                         // Switch to that workspace, then focus
-                        if let Some(old_idx) = self.workspaces.switch_to(idx) {
+                        if let Some(old_idx) = self.workspaces_mut().switch_to(idx) {
                             self.perform_workspace_switch(old_idx)?;
                             self.suppress_enter_focus = true;
                             self.focus_window(window)?;
@@ -2336,7 +2450,7 @@ impl Wm {
             let desktop = event.data.as_data32()[0] as usize;
             log::info!("ClientMessage: _NET_CURRENT_DESKTOP to {}", desktop);
 
-            if let Some(old_idx) = self.workspaces.switch_to(desktop) {
+            if let Some(old_idx) = self.workspaces_mut().switch_to(desktop) {
                 self.perform_workspace_switch(old_idx)?;
             }
         } else if msg_type == self.atoms.net_wm_desktop {
@@ -2357,10 +2471,10 @@ impl Wm {
             return Ok(());
         }
 
-        let current_ws = self.workspaces.current_index();
+        let current_ws = self.workspaces().current_index();
 
         // Find which workspace has this window
-        let source_ws = self.workspaces.workspaces.iter()
+        let source_ws = self.monitors.focused().workspaces.workspaces.iter()
             .enumerate()
             .find(|(_, ws)| ws.layout.find_window(window).is_some())
             .map(|(idx, _)| idx);
@@ -2374,11 +2488,11 @@ impl Wm {
         }
 
         // Remove from source workspace
-        self.workspaces.workspaces[source_ws].layout.remove_window(window);
-        self.workspaces.workspaces[source_ws].layout.remove_empty_frames();
+        self.monitors.focused_mut().workspaces.workspaces[source_ws].layout.remove_window(window);
+        self.monitors.focused_mut().workspaces.workspaces[source_ws].layout.remove_empty_frames();
 
         // Add to target workspace
-        self.workspaces.workspaces[target].layout.add_window(window);
+        self.monitors.focused_mut().workspaces.workspaces[target].layout.add_window(window);
 
         // Update window's _NET_WM_DESKTOP property
         self.set_window_desktop(window, target)?;
@@ -2391,7 +2505,7 @@ impl Wm {
             // If this was the focused window, focus something else
             if self.focused_window == Some(window) {
                 self.focused_window = None;
-                if let Some(frame) = self.workspaces.current().layout.focused_frame() {
+                if let Some(frame) = self.workspaces().current().layout.focused_frame() {
                     if let Some(w) = frame.focused_window() {
                         self.focus_window(w)?;
                     }
@@ -2447,7 +2561,7 @@ impl Wm {
                 log::debug!("ConfigureRequest for window 0x{:x}", e.window);
 
                 // If we're managing this window, re-apply layout (ignore client's request)
-                if self.workspaces.current().layout.find_window(e.window).is_some() {
+                if self.workspaces().current().layout.find_window(e.window).is_some() {
                     self.apply_layout()?;
                 } else {
                     // Unmanaged window - allow the configure
@@ -2462,8 +2576,8 @@ impl Wm {
                 // Focus follows mouse (unless suppressed after explicit focus)
                 if !self.suppress_enter_focus {
                     // Check if window is tiled or floating
-                    let is_tiled = self.workspaces.current().layout.find_window(e.event).is_some();
-                    let is_floating = self.workspaces.current().is_floating(e.event);
+                    let is_tiled = self.workspaces().current().layout.find_window(e.event).is_some();
+                    let is_floating = self.workspaces().current().is_floating(e.event);
                     if is_tiled || is_floating {
                         log::debug!("EnterNotify for window 0x{:x}", e.event);
                         self.focus_window(e.event)?;
@@ -2527,15 +2641,21 @@ impl Wm {
             Event::MotionNotify(e) => {
                 // Handle resize drag - update split ratio in real-time
                 if let Some(DragState::Resize { split_id, direction, split_start, total_size }) = &self.drag_state {
+                    // Copy values to avoid borrow conflict
+                    let split_id = *split_id;
+                    let direction = *direction;
+                    let split_start = *split_start;
+                    let total_size = *total_size;
+
                     // Calculate new ratio from mouse position
                     let mouse_pos = match direction {
                         SplitDirection::Horizontal => e.root_x as i32,
                         SplitDirection::Vertical => e.root_y as i32,
                     };
-                    let ratio = ((mouse_pos - split_start) as f32) / (*total_size as f32);
+                    let ratio = ((mouse_pos - split_start) as f32) / (total_size as f32);
 
                     // Update split and relayout
-                    if self.workspaces.current_mut().layout.set_split_ratio(*split_id, ratio) {
+                    if self.workspaces_mut().current_mut().layout.set_split_ratio(split_id, ratio) {
                         self.apply_layout()?;
                     }
                 }
@@ -2547,7 +2667,7 @@ impl Wm {
                     let new_y = win_y + dy;
 
                     let window = *window;
-                    if let Some(float) = self.workspaces.current_mut().find_floating_mut(window) {
+                    if let Some(float) = self.workspaces_mut().current_mut().find_floating_mut(window) {
                         float.x = new_x;
                         float.y = new_y;
                     }
@@ -2596,7 +2716,7 @@ impl Wm {
                         _ => {}
                     }
 
-                    if let Some(float) = self.workspaces.current_mut().find_floating_mut(window) {
+                    if let Some(float) = self.workspaces_mut().current_mut().find_floating_mut(window) {
                         float.x = new_x;
                         float.y = new_y;
                         float.width = new_w;
@@ -2631,13 +2751,14 @@ impl Wm {
 
     /// Handle expose event (redraw tab bar)
     fn handle_expose(&mut self, event: ExposeEvent) -> Result<()> {
-        let ws_idx = self.workspaces.current_index();
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
         // Find which frame this tab bar belongs to
-        for (&(idx, frame_id), &tab_window) in &self.tab_bar_windows {
-            if idx == ws_idx && tab_window == event.window {
+        for (&(m, idx, frame_id), &tab_window) in &self.tab_bar_windows {
+            if m == mon_id && idx == ws_idx && tab_window == event.window {
                 // Get frame geometry to redraw
                 let screen_rect = self.usable_screen();
-                let geometries = self.workspaces.current().layout.calculate_geometries(screen_rect, self.config.gap);
+                let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
                 for (fid, rect) in geometries {
                     if fid == frame_id {
                         self.draw_tab_bar(frame_id, tab_window, &rect)?;
@@ -2661,7 +2782,7 @@ impl Wm {
 
         let screen = self.usable_screen();
         if let Some((split_id, direction, split_start, total_size)) =
-            self.workspaces.current().layout.find_split_at_gap(screen, self.config.gap, event.root_x as i32, event.root_y as i32)
+            self.workspaces().current().layout.find_split_at_gap(screen, self.config.gap, event.root_x as i32, event.root_y as i32)
         {
             // Select the appropriate resize cursor based on split direction
             let resize_cursor = match direction {
@@ -2704,17 +2825,17 @@ impl Wm {
         }
 
         let screen = self.usable_screen();
-        let geometries = self.workspaces.current().layout.calculate_geometries(screen, self.config.gap);
+        let geometries = self.workspaces().current().layout.calculate_geometries(screen, self.config.gap);
 
         for (frame_id, rect) in &geometries {
-            if let Some(frame) = self.workspaces.current().layout.get(*frame_id).and_then(|n| n.as_frame()) {
+            if let Some(frame) = self.workspaces().current().layout.get(*frame_id).and_then(|n| n.as_frame()) {
                 if frame.is_empty() {
                     let click_x = event.root_x as i32;
                     let click_y = event.root_y as i32;
                     if click_x >= rect.x && click_x < rect.x + rect.width as i32 &&
                        click_y >= rect.y && click_y < rect.y + rect.height as i32 {
                         // Focus this empty frame
-                        self.workspaces.current_mut().layout.focused = *frame_id;
+                        self.workspaces_mut().current_mut().layout.focused = *frame_id;
                         self.apply_layout()?;
                         return Ok(true);
                     }
@@ -2727,18 +2848,19 @@ impl Wm {
 
     /// Handle a click on a tab bar (tab selection, drag, or middle-click removal).
     fn handle_tab_click(&mut self, event: &ButtonPressEvent, frame_id: NodeId) -> Result<()> {
-        let ws_idx = self.workspaces.current_index();
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
 
         // Handle middle click - remove empty frame
         if event.detail == 2 {
-            if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+            if let Some(frame) = self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
                 if frame.is_empty() {
                     // Remove tab bar window
-                    if let Some(tab_window) = self.tab_bar_windows.remove(&(ws_idx, frame_id)) {
+                    if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
                         self.conn.destroy_window(tab_window)?;
                     }
                     // Remove empty frame from layout
-                    self.workspaces.current_mut().layout.remove_empty_frames();
+                    self.workspaces_mut().current_mut().layout.remove_empty_frames();
                     self.apply_layout()?;
                     log::info!("Removed empty frame via middle-click");
                 }
@@ -2752,11 +2874,11 @@ impl Wm {
         }
 
         // Get frame and handle click
-        if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+        if let Some(frame) = self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
             let num_tabs = frame.windows.len();
             if num_tabs == 0 {
                 // Focus the empty frame
-                self.workspaces.current_mut().layout.focused = frame_id;
+                self.workspaces_mut().current_mut().layout.focused = frame_id;
                 self.apply_layout()?;
                 return Ok(());
             }
@@ -2773,7 +2895,7 @@ impl Wm {
                 let window = frame.windows[clicked_tab];
 
                 // Focus this tab immediately
-                if let Some(w) = self.workspaces.current_mut().layout.focus_tab(clicked_tab) {
+                if let Some(w) = self.workspaces_mut().current_mut().layout.focus_tab(clicked_tab) {
                     self.apply_layout()?;
                     self.focus_window(w)?;
                 }
@@ -2819,10 +2941,11 @@ impl Wm {
         }
 
         // Find which frame's tab bar was clicked
-        let ws_idx = self.workspaces.current_index();
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
         let clicked_frame = self.tab_bar_windows.iter()
-            .find(|(&(idx, _), &tab_window)| idx == ws_idx && tab_window == event.event)
-            .map(|(&(_, frame_id), _)| frame_id);
+            .find(|(&(m, idx, _), &tab_window)| m == mon_id && idx == ws_idx && tab_window == event.event)
+            .map(|(&(_, _, frame_id), _)| frame_id);
 
         if let Some(frame_id) = clicked_frame {
             self.handle_tab_click(&event, frame_id)?;
@@ -2841,12 +2964,12 @@ impl Wm {
 
         // Check if the clicked window is floating
         let clicked_window = event.event;
-        if !self.workspaces.current().is_floating(clicked_window) {
+        if !self.workspaces().current().is_floating(clicked_window) {
             return Ok(false);
         }
 
         // Get the floating window info
-        let float_info = match self.workspaces.current().find_floating(clicked_window) {
+        let float_info = match self.workspaces().current().find_floating(clicked_window) {
             Some(f) => *f,
             None => return Ok(false),
         };
@@ -2934,10 +3057,11 @@ impl Wm {
     /// Find the drop target for a drag operation
     /// Returns (frame_id, tab_index) - tab_index is the position to insert at
     fn find_drop_target(&self, root_x: i16, root_y: i16) -> Result<(Option<NodeId>, Option<usize>)> {
-        let ws_idx = self.workspaces.current_index();
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
         // Check each tab bar window first (higher priority than content area)
-        for (&(idx, frame_id), &tab_window) in &self.tab_bar_windows {
-            if idx != ws_idx {
+        for (&(m, idx, frame_id), &tab_window) in &self.tab_bar_windows {
+            if m != mon_id || idx != ws_idx {
                 continue;
             }
             let geom = self.conn.get_geometry(tab_window)?.reply()?;
@@ -2965,7 +3089,7 @@ impl Wm {
 
         // Check frame content areas (for dropping into single-window frames or frames without visible tab bars)
         let screen_rect = self.usable_screen();
-        let geometries = self.workspaces.current().layout.calculate_geometries(screen_rect, self.config.gap);
+        let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
 
         for (frame_id, rect) in geometries {
             if (root_x as i32) >= rect.x && (root_x as i32) < rect.x + rect.width as i32 &&
@@ -3003,13 +3127,13 @@ impl Wm {
                         // Reorder within same frame
                         if let Some(target_idx) = target_index {
                             if target_idx != source_index {
-                                self.workspaces.current_mut().layout.reorder_tab(target_frame, source_index, target_idx);
+                                self.workspaces_mut().current_mut().layout.reorder_tab(target_frame, source_index, target_idx);
                                 log::info!("Reordered tab from {} to {}", source_index + 1, target_idx + 1);
                             }
                         }
                     } else {
                         // Move to different frame
-                        self.workspaces.current_mut().layout.move_window_to_frame(window, source_frame, target_frame);
+                        self.workspaces_mut().current_mut().layout.move_window_to_frame(window, source_frame, target_frame);
 
                         log::info!("Moved window 0x{:x} to different frame", window);
                     }
@@ -3040,10 +3164,10 @@ impl Wm {
     /// Resize the current split
     fn resize_split(&mut self, grow: bool) -> Result<()> {
         let delta = if grow { 0.05 } else { -0.05 };
-        if self.workspaces.current_mut().layout.resize_focused_split(delta) {
+        if self.workspaces_mut().current_mut().layout.resize_focused_split(delta) {
             // Trace the resize (simplified - we don't track exact ratios)
             self.tracer.trace_transition(&StateTransition::SplitResized {
-                split: format!("{:?}", self.workspaces.current().layout.focused),
+                split: format!("{:?}", self.workspaces().current().layout.focused),
                 old_ratio: 0.5, // placeholder
                 new_ratio: 0.5 + delta,
             });
@@ -3056,11 +3180,11 @@ impl Wm {
     /// Move the focused window to an adjacent frame
     fn move_window(&mut self, forward: bool) -> Result<()> {
         // Capture source frame before move
-        let from_frame = self.workspaces.current().layout.focused;
+        let from_frame = self.workspaces().current().layout.focused;
 
-        if let Some(window) = self.workspaces.current_mut().layout.move_window_to_adjacent(forward) {
+        if let Some(window) = self.workspaces_mut().current_mut().layout.move_window_to_adjacent(forward) {
             // Trace the move
-            let to_frame = self.workspaces.current().layout.focused;
+            let to_frame = self.workspaces().current().layout.focused;
             self.tracer.trace_transition(&StateTransition::WindowMoved {
                 window,
                 from_frame: format!("{:?}", from_frame),
@@ -3068,7 +3192,7 @@ impl Wm {
             });
 
             // Clean up empty frames
-            self.workspaces.current_mut().layout.remove_empty_frames();
+            self.workspaces_mut().current_mut().layout.remove_empty_frames();
             self.apply_layout()?;
             self.suppress_enter_focus = true;
             self.focus_window(window)?;
@@ -3162,6 +3286,8 @@ impl Wm {
             WmAction::UntagAll => self.untag_all_windows()?,
             WmAction::ToggleFloat => self.toggle_float(None)?,
             WmAction::FocusUrgent => self.focus_urgent()?,
+            WmAction::FocusMonitorLeft => self.focus_monitor_direction(Direction::Left)?,
+            WmAction::FocusMonitorRight => self.focus_monitor_direction(Direction::Right)?,
         }
         Ok(())
     }
@@ -3227,12 +3353,12 @@ impl Wm {
                 }
             }
             IpcCommand::GetLayout => {
-                let geometries = self.workspaces.current().layout.calculate_geometries(
+                let geometries = self.workspaces().current().layout.calculate_geometries(
                     self.usable_screen(),
                     self.config.gap,
                 );
                 IpcResponse::Layout {
-                    data: self.workspaces.current().layout.snapshot(Some(&geometries)),
+                    data: self.workspaces().current().layout.snapshot(Some(&geometries)),
                 }
             }
             IpcCommand::GetWindows => {
@@ -3447,7 +3573,7 @@ impl Wm {
                 }
             }
             IpcCommand::GetFloating => {
-                let floating: Vec<u32> = self.workspaces.current().floating_window_ids();
+                let floating: Vec<u32> = self.workspaces().current().floating_window_ids();
                 IpcResponse::Floating { windows: floating }
             }
             IpcCommand::GetUrgent => {
@@ -3464,7 +3590,7 @@ impl Wm {
                 }
             }
             IpcCommand::SwitchWorkspace { index } => {
-                if let Some(old_idx) = self.workspaces.switch_to(index) {
+                if let Some(old_idx) = self.workspaces_mut().switch_to(index) {
                     match self.perform_workspace_switch(old_idx) {
                         Ok(()) => IpcResponse::Ok,
                         Err(e) => IpcResponse::Error {
@@ -3496,7 +3622,7 @@ impl Wm {
             }
             IpcCommand::GetCurrentWorkspace => {
                 IpcResponse::Workspace {
-                    index: self.workspaces.current_index(),
+                    index: self.workspaces().current_index(),
                     total: 9,
                 }
             }
@@ -3514,6 +3640,69 @@ impl Wm {
                     IpcResponse::Error {
                         code: "no_window".to_string(),
                         message: "No window specified and no focused window".to_string(),
+                    }
+                }
+            }
+            IpcCommand::GetMonitors => {
+                let monitors: Vec<_> = self.monitors.iter()
+                    .map(|(id, monitor)| {
+                        ipc::MonitorInfo {
+                            name: monitor.name.clone(),
+                            x: monitor.geometry.x,
+                            y: monitor.geometry.y,
+                            width: monitor.geometry.width,
+                            height: monitor.geometry.height,
+                            is_primary: monitor.primary,
+                            is_focused: id == self.monitors.focused_id(),
+                            current_workspace: monitor.workspaces.current_index(),
+                        }
+                    })
+                    .collect();
+                IpcResponse::Monitors { data: monitors }
+            }
+            IpcCommand::GetCurrentMonitor => {
+                let monitor = self.monitors.focused();
+                IpcResponse::Monitor {
+                    name: monitor.name.clone(),
+                    is_primary: monitor.primary,
+                }
+            }
+            IpcCommand::FocusMonitor { target } => {
+                match target.to_lowercase().as_str() {
+                    "left" => {
+                        match self.focus_monitor_direction(Direction::Left) {
+                            Ok(()) => IpcResponse::Ok,
+                            Err(e) => IpcResponse::Error {
+                                code: "focus_monitor_failed".to_string(),
+                                message: e.to_string(),
+                            },
+                        }
+                    }
+                    "right" => {
+                        match self.focus_monitor_direction(Direction::Right) {
+                            Ok(()) => IpcResponse::Ok,
+                            Err(e) => IpcResponse::Error {
+                                code: "focus_monitor_failed".to_string(),
+                                message: e.to_string(),
+                            },
+                        }
+                    }
+                    name => {
+                        // Try to find monitor by name
+                        if let Some(monitor_id) = self.monitors.find_by_name(name) {
+                            match self.focus_monitor(monitor_id) {
+                                Ok(()) => IpcResponse::Ok,
+                                Err(e) => IpcResponse::Error {
+                                    code: "focus_monitor_failed".to_string(),
+                                    message: e.to_string(),
+                                },
+                            }
+                        } else {
+                            IpcResponse::Error {
+                                code: "monitor_not_found".to_string(),
+                                message: format!("Monitor '{}' not found", name),
+                            }
+                        }
                     }
                 }
             }
@@ -3546,18 +3735,18 @@ impl Wm {
 
     /// Create a snapshot of the current WM state for IPC
     fn snapshot_state(&self) -> WmStateSnapshot {
-        let geometries = self.workspaces.current().layout.calculate_geometries(
+        let geometries = self.workspaces().current().layout.calculate_geometries(
             self.usable_screen(),
             self.config.gap,
         );
-        let tiled_count = self.workspaces.current().layout.all_windows().len();
-        let floating_count = self.workspaces.current().floating_windows.len();
+        let tiled_count = self.workspaces().current().layout.all_windows().len();
+        let floating_count = self.workspaces().current().floating_windows.len();
         WmStateSnapshot {
             focused_window: self.focused_window,
-            focused_frame: self.workspaces.current().layout.focused_frame_id(),
+            focused_frame: self.workspaces().current().layout.focused_frame_id(),
             window_count: tiled_count + floating_count,
-            frame_count: self.workspaces.current().layout.all_frames().len(),
-            layout: self.workspaces.current().layout.snapshot(Some(&geometries)),
+            frame_count: self.workspaces().current().layout.all_frames().len(),
+            layout: self.workspaces().current().layout.snapshot(Some(&geometries)),
             windows: self.get_window_info_list(),
         }
     }
@@ -3565,12 +3754,12 @@ impl Wm {
     /// Get information about all managed windows
     fn get_window_info_list(&self) -> Vec<WindowInfo> {
         let mut windows = Vec::new();
-        let all_frames = self.workspaces.current().layout.all_frames();
+        let all_frames = self.workspaces().current().layout.all_frames();
 
         // Add tiled windows
         for frame_id in all_frames {
-            if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
-                let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
+            if let Some(frame) = self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+                let is_focused_frame = frame_id == self.workspaces().current().layout.focused;
                 for (tab_index, &window) in frame.windows.iter().enumerate() {
                     let is_focused_tab = tab_index == frame.focused;
                     windows.push(WindowInfo {
@@ -3589,7 +3778,7 @@ impl Wm {
         }
 
         // Add floating windows
-        for fw in &self.workspaces.current().floating_windows {
+        for fw in &self.workspaces().current().floating_windows {
             windows.push(WindowInfo {
                 id: fw.window,
                 title: self.get_window_title(fw.window),
@@ -3612,29 +3801,30 @@ impl Wm {
 
         // Check: focused window should be in layout or floating
         if let Some(w) = self.focused_window {
-            let in_layout = self.workspaces.current().layout.find_window(w).is_some();
-            let is_floating = self.workspaces.current().is_floating(w);
+            let in_layout = self.workspaces().current().layout.find_window(w).is_some();
+            let is_floating = self.workspaces().current().is_floating(w);
             if !in_layout && !is_floating {
                 violations.push(format!("Focused window 0x{:x} is not in layout or floating", w));
             }
         }
 
         // Check: focused frame should exist
-        if self.workspaces.current().layout.get(self.workspaces.current().layout.focused).is_none() {
-            violations.push(format!("Focused frame {:?} does not exist", self.workspaces.current().layout.focused));
+        if self.workspaces().current().layout.get(self.workspaces().current().layout.focused).is_none() {
+            violations.push(format!("Focused frame {:?} does not exist", self.workspaces().current().layout.focused));
         }
 
         // Check: all hidden windows should be in layout
         for &w in &self.hidden_windows {
-            if self.workspaces.current().layout.find_window(w).is_none() {
+            if self.workspaces().current().layout.find_window(w).is_none() {
                 violations.push(format!("Hidden window 0x{:x} is not in layout", w));
             }
         }
 
         // Check: tab bar windows should correspond to existing frames
-        let ws_idx = self.workspaces.current_index();
-        for &(idx, frame_id) in self.tab_bar_windows.keys() {
-            if idx == ws_idx && self.workspaces.current().layout.get(frame_id).is_none() {
+        let mon_id = self.monitors.focused_id();
+        let ws_idx = self.workspaces().current_index();
+        for &(m, idx, frame_id) in self.tab_bar_windows.keys() {
+            if m == mon_id && idx == ws_idx && self.workspaces().current().layout.get(frame_id).is_none() {
                 violations.push(format!("Tab bar for non-existent frame {:?}", frame_id));
             }
         }

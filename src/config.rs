@@ -99,6 +99,8 @@ pub struct KeybindingConfig {
     pub untag_all: Option<String>,
     pub toggle_float: Option<String>,
     pub focus_urgent: Option<String>,
+    pub focus_monitor_left: Option<String>,
+    pub focus_monitor_right: Option<String>,
 }
 
 /// Parsed keybinding (ready for X11 grab)
@@ -136,6 +138,8 @@ pub enum WmAction {
     UntagAll,
     ToggleFloat,
     FocusUrgent,
+    FocusMonitorLeft,
+    FocusMonitorRight,
 }
 
 impl Config {
@@ -219,6 +223,8 @@ impl Config {
         insert(WmAction::UntagAll, &self.keybindings.untag_all);
         insert(WmAction::ToggleFloat, &self.keybindings.toggle_float);
         insert(WmAction::FocusUrgent, &self.keybindings.focus_urgent);
+        insert(WmAction::FocusMonitorLeft, &self.keybindings.focus_monitor_left);
+        insert(WmAction::FocusMonitorRight, &self.keybindings.focus_monitor_right);
 
         // Parse exec bindings (key combo -> command)
         for (key_combo, command) in &self.exec.bindings {
@@ -411,6 +417,8 @@ impl Default for KeybindingConfig {
             untag_all: Some("Mod4+Shift+t".to_string()),
             toggle_float: Some("Mod4+f".to_string()),
             focus_urgent: Some("Mod4+space".to_string()),
+            focus_monitor_left: Some("Mod4+Control+Left".to_string()),
+            focus_monitor_right: Some("Mod4+Control+Right".to_string()),
         }
     }
 }

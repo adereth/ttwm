@@ -92,6 +92,10 @@ untag_all = "Mod4+Shift+t"
 # Urgent windows
 focus_urgent = "Mod4+space"
 
+# Monitor navigation (for multi-monitor setups)
+focus_monitor_left = "Mod4+Control+Left"
+focus_monitor_right = "Mod4+Control+Right"
+
 [exec]
 # Run programs with keybindings
 # Format: "Modifier+Key" = "command [args...]"

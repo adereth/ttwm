@@ -100,6 +100,14 @@ pub enum IpcCommand {
     /// Move a window to a specific workspace
     MoveToWorkspace { window: Option<u32>, workspace: usize },
 
+    // Monitors
+    /// Get list of all monitors
+    GetMonitors,
+    /// Get currently focused monitor
+    GetCurrentMonitor,
+    /// Focus a specific monitor by name or direction (left/right)
+    FocusMonitor { target: String },
+
     // Debug
     /// Capture screenshot to file
     Screenshot { path: String },
@@ -140,6 +148,10 @@ pub enum IpcResponse {
     Urgent { windows: Vec<u32> },
     /// Current workspace info
     Workspace { index: usize, total: usize },
+    /// List of monitors
+    Monitors { data: Vec<MonitorInfo> },
+    /// Current monitor info
+    Monitor { name: String, is_primary: bool },
     /// Error response
     Error { code: String, message: String },
 }
@@ -177,6 +189,19 @@ pub struct EventLogEntry {
     pub event_type: String,
     pub window: Option<u32>,
     pub details: String,
+}
+
+/// Information about a monitor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
+    pub is_focused: bool,
+    pub current_workspace: usize,
 }
 
 /// IPC server that listens on a Unix socket
