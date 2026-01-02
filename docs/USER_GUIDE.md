@@ -33,6 +33,17 @@ A **frame** is a rectangular area on the screen that can hold one or more window
 
 ttwm provides **9 virtual workspaces** (desktops). Each workspace maintains its own independent layout tree. Cycle through workspaces to organize windows by task or project.
 
+### Floating Windows
+
+**Floating windows** are exempt from the tiling layout. They render above tiled windows and can be freely moved and resized with the mouse. Some window types automatically float:
+
+- Dialog boxes
+- Splash screens
+- Toolbars and utility windows
+- Menus and tooltips
+
+You can manually toggle any window between tiled and floating mode with `Mod4+f`. Floating windows are per-workspace (hidden when you switch workspaces).
+
 ---
 
 ## Installation
@@ -110,6 +121,7 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 | Shortcut | Action |
 |----------|--------|
 | `Mod4+q` | Close focused window |
+| `Mod4+f` | Toggle floating mode for focused window |
 | `Mod4+Shift+q` | Quit ttwm |
 
 ### Tab Navigation
@@ -188,6 +200,14 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 ### Gap Between Frames
 
 - **Left-click and drag**: Resize the split by dragging the gap between frames
+
+### Floating Windows
+
+- **Left-click inside a floating window**: Focus the window
+- **Left-click and drag inside a floating window**: Move the window
+- **Left-click and drag on the edge/corner of a floating window**: Resize the window
+
+Floating windows have an 8-pixel resize zone around their edges. The cursor will change to indicate resize direction.
 
 ---
 
@@ -280,7 +300,7 @@ All available keybinding options:
 - `move_window_left`, `move_window_right`
 - `resize_shrink`, `resize_grow`
 - `split_horizontal`, `split_vertical`
-- `close_window`, `quit`
+- `close_window`, `toggle_float`, `quit`
 - `workspace_next`, `workspace_prev`
 - `tag_window`, `move_tagged_windows`, `untag_all`
 
@@ -359,6 +379,11 @@ ttwmctl toggle-tag             # Toggle tag on focused window
 ttwmctl move-tagged            # Move all tagged to focused frame
 ttwmctl untag-all              # Untag all windows
 ttwmctl tagged                 # List tagged window IDs
+
+# Floating window commands
+ttwmctl toggle-float           # Toggle floating for focused window
+ttwmctl toggle-float 0x1c00004 # Toggle floating for specific window
+ttwmctl floating               # List floating window IDs
 
 # Workspace commands
 ttwmctl workspace 3            # Switch to workspace 3

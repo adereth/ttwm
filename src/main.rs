@@ -89,6 +89,19 @@ impl Default for LayoutConfig {
     }
 }
 
+/// Edge or corner of a floating window for resizing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 /// Drag state for tab drag-and-drop or resize operations
 enum DragState {
     /// Dragging a tab between frames
@@ -110,6 +123,32 @@ enum DragState {
         split_start: i32,
         /// Total size in the split direction
         total_size: u32,
+    },
+    /// Moving a floating window
+    FloatMove {
+        /// The window being moved
+        window: Window,
+        /// Mouse start position (root coordinates)
+        start_x: i32,
+        start_y: i32,
+        /// Window start position
+        win_x: i32,
+        win_y: i32,
+    },
+    /// Resizing a floating window
+    FloatResize {
+        /// The window being resized
+        window: Window,
+        /// Which edge/corner is being dragged
+        edge: ResizeEdge,
+        /// Mouse start position (root coordinates)
+        start_x: i32,
+        start_y: i32,
+        /// Original window geometry
+        original_x: i32,
+        original_y: i32,
+        original_w: u32,
+        original_h: u32,
     },
 }
 
@@ -526,10 +565,16 @@ impl Wm {
         // Save current workspace's focused window
         self.workspaces.workspaces[old_idx].last_focused_window = self.focused_window;
 
-        // Hide all windows from old workspace
+        // Hide all tiled windows from old workspace
         for window in self.workspaces.workspaces[old_idx].layout.all_windows() {
             self.hidden_windows.insert(window);
             self.conn.unmap_window(window)?;
+        }
+
+        // Hide all floating windows from old workspace
+        for floating in &self.workspaces.workspaces[old_idx].floating_windows {
+            self.hidden_windows.insert(floating.window);
+            self.conn.unmap_window(floating.window)?;
         }
 
         // Hide tab bars from old workspace
@@ -539,26 +584,33 @@ impl Wm {
             }
         }
 
-        // Show windows from new workspace
+        // Show windows from new workspace (remove from hidden set)
         for window in self.workspaces.current().layout.all_windows() {
             self.hidden_windows.remove(&window);
+        }
+        for floating in &self.workspaces.current().floating_windows {
+            self.hidden_windows.remove(&floating.window);
         }
 
         // Clear focused window (will be restored below)
         self.focused_window = None;
 
-        // Apply layout for new workspace
+        // Apply layout for new workspace (handles both tiled and floating)
         self.apply_layout()?;
 
         // Restore focus to last focused window in new workspace
         if let Some(w) = self.workspaces.current().last_focused_window {
-            if self.workspaces.current().layout.find_window(w).is_some() {
+            // Check if window exists (either tiled or floating)
+            let is_tiled = self.workspaces.current().layout.find_window(w).is_some();
+            let is_floating = self.workspaces.current().is_floating(w);
+            if is_tiled || is_floating {
                 self.focus_window(w)?;
             }
-        } else if let Some(frame) = self.workspaces.current().layout.focused_frame() {
-            if let Some(w) = frame.focused_window() {
-                self.focus_window(w)?;
-            }
+        }
+
+        // If no focus restored, try to focus something
+        if self.focused_window.is_none() {
+            self.focus_next_available_window()?;
         }
 
         // Update EWMH
@@ -570,9 +622,13 @@ impl Wm {
 
     /// Update _NET_CLIENT_LIST with current windows (from all workspaces)
     fn update_client_list(&self) -> Result<()> {
-        let windows: Vec<Window> = self.workspaces.workspaces.iter()
+        let mut windows: Vec<Window> = self.workspaces.workspaces.iter()
             .flat_map(|ws| ws.layout.all_windows())
             .collect();
+        // Also include floating windows
+        for ws in &self.workspaces.workspaces {
+            windows.extend(ws.floating_window_ids());
+        }
         self.conn.change_property32(
             PropMode::REPLACE,
             self.root,
@@ -1331,7 +1387,46 @@ impl Wm {
         // Clean up tab bars for removed frames
         self.cleanup_tab_bars();
 
+        // Apply floating window layout
+        self.apply_floating_layout()?;
+
         self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Apply layout for floating windows in the current workspace
+    fn apply_floating_layout(&mut self) -> Result<()> {
+        let border = self.config.border_width;
+
+        // Get floating windows for current workspace
+        let floating_windows: Vec<_> = self.workspaces.current()
+            .floating_windows
+            .iter()
+            .map(|f| (f.window, f.x, f.y, f.width, f.height))
+            .collect();
+
+        for (window, x, y, width, height) in floating_windows {
+            // Configure window geometry
+            self.conn.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .x(x)
+                    .y(y)
+                    .width(width.saturating_sub(border * 2))
+                    .height(height.saturating_sub(border * 2))
+                    .border_width(border)
+                    .stack_mode(StackMode::ABOVE),
+            )?;
+
+            // Make sure window is mapped
+            self.conn.map_window(window)?;
+
+            log::debug!(
+                "Applied floating layout for 0x{:x}: ({}, {}) {}x{}",
+                window, x, y, width, height
+            );
+        }
+
         Ok(())
     }
 
@@ -1430,10 +1525,58 @@ impl Wm {
         Ok(())
     }
 
+    /// Check if a window should float based on its _NET_WM_WINDOW_TYPE property
+    fn should_float(&self, window: Window) -> bool {
+        // Query the _NET_WM_WINDOW_TYPE property
+        let reply = match self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_window_type,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        ) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => reply,
+                Err(_) => return false,
+            },
+            Err(_) => return false,
+        };
+
+        // Check if any window type indicates it should float
+        if let Some(types) = reply.value32() {
+            for window_type in types {
+                if window_type == self.atoms.net_wm_window_type_dialog
+                    || window_type == self.atoms.net_wm_window_type_splash
+                    || window_type == self.atoms.net_wm_window_type_toolbar
+                    || window_type == self.atoms.net_wm_window_type_utility
+                    || window_type == self.atoms.net_wm_window_type_menu
+                    || window_type == self.atoms.net_wm_window_type_popup_menu
+                    || window_type == self.atoms.net_wm_window_type_dropdown_menu
+                    || window_type == self.atoms.net_wm_window_type_tooltip
+                    || window_type == self.atoms.net_wm_window_type_notification
+                {
+                    log::info!("Window 0x{:x} should float (window type)", window);
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if a window is currently floating
+    fn is_floating(&self, window: Window) -> bool {
+        self.workspaces.current().is_floating(window)
+    }
+
     /// Start managing a window
     fn manage_window(&mut self, window: Window) -> Result<()> {
-        // Check if already managed
+        // Check if already managed (either tiled or floating)
         if self.workspaces.current().layout.find_window(window).is_some() {
+            return Ok(());
+        }
+        if self.workspaces.current().is_floating(window) {
             return Ok(());
         }
 
@@ -1456,15 +1599,52 @@ impl Wm {
         // Map the window (make it visible)
         self.conn.map_window(window)?;
 
-        // Add to the focused frame in our layout
-        self.workspaces.current_mut().layout.add_window(window);
+        // Check if window should float (based on _NET_WM_WINDOW_TYPE)
+        if self.should_float(window) {
+            // Get window geometry for floating placement
+            let geom = self.conn.get_geometry(window)?.reply()?;
+            let screen = &self.conn.setup().roots[self.screen_num];
 
-        // Trace the window being managed
-        if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
+            // Center the window if it's at 0,0 (common for dialogs)
+            let (x, y) = if geom.x == 0 && geom.y == 0 {
+                // Center on screen
+                let x = (screen.width_in_pixels as i32 - geom.width as i32) / 2;
+                let y = (screen.height_in_pixels as i32 - geom.height as i32) / 2;
+                (x.max(0), y.max(0))
+            } else {
+                (geom.x as i32, geom.y as i32)
+            };
+
+            // Add to floating windows
+            self.workspaces.current_mut().add_floating(
+                window,
+                x,
+                y,
+                geom.width as u32,
+                geom.height as u32,
+            );
+
+            log::info!(
+                "Managing floating window 0x{:x} at ({}, {}) {}x{}",
+                window, x, y, geom.width, geom.height
+            );
+
+            // Trace the window being managed as floating
             self.tracer.trace_transition(&StateTransition::WindowManaged {
                 window,
-                frame: format!("{:?}", frame_id),
+                frame: "floating".to_string(),
             });
+        } else {
+            // Add to the focused frame in our layout (tiled)
+            self.workspaces.current_mut().layout.add_window(window);
+
+            // Trace the window being managed
+            if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
+                self.tracer.trace_transition(&StateTransition::WindowManaged {
+                    window,
+                    frame: format!("{:?}", frame_id),
+                });
+            }
         }
 
         // Apply layout to position all windows
@@ -1498,7 +1678,31 @@ impl Wm {
         // Remove from tagged set if present
         self.tagged_windows.remove(&window);
 
-        // Trace before removing
+        // Check if this is a floating window
+        if self.workspaces.current().is_floating(window) {
+            self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
+                window,
+                reason: UnmanageReason::ClientDestroyed,
+            });
+
+            self.workspaces.current_mut().remove_floating(window);
+            log::info!("Unmanaging floating window 0x{:x}", window);
+
+            // Update EWMH client list
+            self.update_client_list()?;
+
+            // If this was focused, focus another window
+            if self.focused_window == Some(window) {
+                self.focused_window = None;
+                self.focus_next_available_window()?;
+            }
+
+            // Re-apply layout
+            self.apply_layout()?;
+            return Ok(());
+        }
+
+        // Trace before removing (tiled window)
         if self.workspaces.current().layout.find_window(window).is_some() {
             self.tracer.trace_transition(&StateTransition::WindowUnmanaged {
                 window,
@@ -1515,23 +1719,7 @@ impl Wm {
             // If this was focused, focus another window
             if self.focused_window == Some(window) {
                 self.focused_window = None;
-
-                // Try to focus the window in the focused frame
-                if let Some(frame) = self.workspaces.current().layout.focused_frame() {
-                    if let Some(w) = frame.focused_window() {
-                        self.focus_window(w)?;
-                    }
-                }
-
-                // If still no focus, try any window
-                if self.focused_window.is_none() {
-                    let windows = self.workspaces.current().layout.all_windows();
-                    if let Some(&w) = windows.first() {
-                        self.focus_window(w)?;
-                    } else {
-                        self.update_active_window()?;
-                    }
-                }
+                self.focus_next_available_window()?;
             }
 
             // Re-apply layout
@@ -1541,9 +1729,94 @@ impl Wm {
         Ok(())
     }
 
-    /// Cycle focus to the next/previous window (across all frames)
-    fn cycle_focus(&mut self, forward: bool) -> Result<()> {
+    /// Focus the next available window (floating or tiled)
+    fn focus_next_available_window(&mut self) -> Result<()> {
+        // First try floating windows
+        let floating_windows = self.workspaces.current().floating_window_ids();
+        if let Some(&w) = floating_windows.first() {
+            return self.focus_window(w);
+        }
+
+        // Try to focus the window in the focused frame
+        if let Some(frame) = self.workspaces.current().layout.focused_frame() {
+            if let Some(w) = frame.focused_window() {
+                return self.focus_window(w);
+            }
+        }
+
+        // If still no focus, try any tiled window
         let windows = self.workspaces.current().layout.all_windows();
+        if let Some(&w) = windows.first() {
+            self.focus_window(w)?;
+        } else {
+            self.update_active_window()?;
+        }
+
+        Ok(())
+    }
+
+    /// Toggle a window between floating and tiled states
+    /// If window is None, uses the focused window
+    fn toggle_float(&mut self, window: Option<Window>) -> Result<()> {
+        let window = match window.or(self.focused_window) {
+            Some(w) => w,
+            None => {
+                log::info!("No window to toggle float");
+                return Ok(());
+            }
+        };
+
+        if self.workspaces.current().is_floating(window) {
+            // Currently floating -> make it tiled
+            if let Some(float_info) = self.workspaces.current_mut().remove_floating(window) {
+                log::info!(
+                    "Tiling floating window 0x{:x} (was at {}, {} {}x{})",
+                    window, float_info.x, float_info.y, float_info.width, float_info.height
+                );
+
+                // Add to the focused frame in the layout
+                self.workspaces.current_mut().layout.add_window(window);
+
+                // Apply layout and focus
+                self.apply_layout()?;
+                self.focus_window(window)?;
+            }
+        } else {
+            // Currently tiled -> make it floating
+            // Get current geometry before removing from layout
+            let geom = self.conn.get_geometry(window)?.reply()?;
+
+            // Remove from tiled layout
+            if let Some(_frame_id) = self.workspaces.current_mut().layout.remove_window(window) {
+                log::info!(
+                    "Floating window 0x{:x} at ({}, {}) {}x{}",
+                    window, geom.x, geom.y, geom.width, geom.height
+                );
+
+                // Add to floating windows with current geometry
+                self.workspaces.current_mut().add_floating(
+                    window,
+                    geom.x as i32,
+                    geom.y as i32,
+                    geom.width as u32,
+                    geom.height as u32,
+                );
+
+                // Apply layout and focus
+                self.apply_layout()?;
+                self.focus_window(window)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Cycle focus to the next/previous window (across all frames and floating windows)
+    fn cycle_focus(&mut self, forward: bool) -> Result<()> {
+        // Build a list of all windows: tiled first, then floating
+        let mut windows = self.workspaces.current().layout.all_windows();
+        windows.extend(self.workspaces.current().floating_window_ids());
+
         if windows.is_empty() {
             return Ok(());
         }
@@ -1677,12 +1950,17 @@ impl Wm {
 
         // Unfocus the previously focused window
         if let Some(old) = self.focused_window {
-            if old != window && self.workspaces.current().layout.find_window(old).is_some() {
-                self.conn.change_window_attributes(
-                    old,
-                    &ChangeWindowAttributesAux::new()
-                        .border_pixel(self.config.border_unfocused),
-                )?;
+            if old != window {
+                // Check if old window is tiled or floating
+                let is_tiled = self.workspaces.current().layout.find_window(old).is_some();
+                let is_floating = self.workspaces.current().is_floating(old);
+                if is_tiled || is_floating {
+                    self.conn.change_window_attributes(
+                        old,
+                        &ChangeWindowAttributesAux::new()
+                            .border_pixel(self.config.border_unfocused),
+                    )?;
+                }
             }
         }
 
@@ -1712,7 +1990,15 @@ impl Wm {
             });
         }
 
-        // Also update the layout's focused frame to match
+        // For floating windows, just update EWMH and return
+        if self.workspaces.current().is_floating(window) {
+            log::info!("Focused floating window 0x{:x}", window);
+            self.update_active_window()?;
+            self.conn.flush()?;
+            return Ok(());
+        }
+
+        // Also update the layout's focused frame to match (for tiled windows)
         if let Some(frame_id) = self.workspaces.current().layout.find_window(window) {
             let old_focused_frame = self.workspaces.current().layout.focused;
             self.workspaces.current_mut().layout.focused = frame_id;
@@ -1983,7 +2269,10 @@ impl Wm {
                 self.tracer.trace_x11_event("EnterNotify", Some(e.event), "");
                 // Focus follows mouse (unless suppressed after explicit focus)
                 if !self.suppress_enter_focus {
-                    if self.workspaces.current().layout.find_window(e.event).is_some() {
+                    // Check if window is tiled or floating
+                    let is_tiled = self.workspaces.current().layout.find_window(e.event).is_some();
+                    let is_floating = self.workspaces.current().is_floating(e.event);
+                    if is_tiled || is_floating {
                         log::debug!("EnterNotify for window 0x{:x}", e.event);
                         self.focus_window(e.event)?;
                     }
@@ -2041,6 +2330,72 @@ impl Wm {
                     if self.workspaces.current_mut().layout.set_split_ratio(*split_id, ratio) {
                         self.apply_layout()?;
                     }
+                }
+                // Handle floating window move
+                else if let Some(DragState::FloatMove { window, start_x, start_y, win_x, win_y }) = &self.drag_state {
+                    let dx = e.root_x as i32 - start_x;
+                    let dy = e.root_y as i32 - start_y;
+                    let new_x = win_x + dx;
+                    let new_y = win_y + dy;
+
+                    let window = *window;
+                    if let Some(float) = self.workspaces.current_mut().find_floating_mut(window) {
+                        float.x = new_x;
+                        float.y = new_y;
+                    }
+                    self.apply_floating_layout()?;
+                    self.conn.flush()?;
+                }
+                // Handle floating window resize
+                else if let Some(DragState::FloatResize { window, edge, start_x, start_y, original_x, original_y, original_w, original_h }) = &self.drag_state {
+                    let dx = e.root_x as i32 - start_x;
+                    let dy = e.root_y as i32 - start_y;
+
+                    let edge = *edge;
+                    let window = *window;
+                    let original_x = *original_x;
+                    let original_y = *original_y;
+                    let original_w = *original_w;
+                    let original_h = *original_h;
+
+                    // Calculate new geometry based on which edge is being dragged
+                    const MIN_SIZE: u32 = 100;
+                    let (mut new_x, mut new_y, mut new_w, mut new_h) = (original_x, original_y, original_w, original_h);
+
+                    match edge {
+                        ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft => {
+                            let max_dx = (original_w as i32 - MIN_SIZE as i32).max(0);
+                            let clamped_dx = dx.min(max_dx);
+                            new_x = original_x + clamped_dx;
+                            new_w = (original_w as i32 - clamped_dx).max(MIN_SIZE as i32) as u32;
+                        }
+                        ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight => {
+                            new_w = (original_w as i32 + dx).max(MIN_SIZE as i32) as u32;
+                        }
+                        _ => {}
+                    }
+
+                    match edge {
+                        ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight => {
+                            let max_dy = (original_h as i32 - MIN_SIZE as i32).max(0);
+                            let clamped_dy = dy.min(max_dy);
+                            new_y = original_y + clamped_dy;
+                            new_h = (original_h as i32 - clamped_dy).max(MIN_SIZE as i32) as u32;
+                        }
+                        ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight => {
+                            new_h = (original_h as i32 + dy).max(MIN_SIZE as i32) as u32;
+                        }
+                        _ => {}
+                    }
+
+                    if let Some(float) = self.workspaces.current_mut().find_floating_mut(window) {
+                        float.x = new_x;
+                        float.y = new_y;
+                        float.width = new_w;
+                        float.height = new_h;
+                    }
+                    self.apply_floating_layout()?;
+                    self.conn.flush()?;
                 }
                 // Tab drags don't need motion processing - drop target determined at release
             }
@@ -2250,6 +2605,11 @@ impl Wm {
             return Ok(());
         }
 
+        // Check for click on a floating window
+        if self.try_handle_float_click(&event)? {
+            return Ok(());
+        }
+
         // Find which frame's tab bar was clicked
         let ws_idx = self.workspaces.current_index();
         let clicked_frame = self.tab_bar_windows.iter()
@@ -2261,6 +2621,106 @@ impl Wm {
         }
 
         Ok(())
+    }
+
+    /// Try to handle a click on a floating window
+    /// Returns Ok(true) if a floating window was clicked, Ok(false) otherwise
+    fn try_handle_float_click(&mut self, event: &ButtonPressEvent) -> Result<bool> {
+        // Only handle left-click (button 1)
+        if event.detail != 1 {
+            return Ok(false);
+        }
+
+        // Check if the clicked window is floating
+        let clicked_window = event.event;
+        if !self.workspaces.current().is_floating(clicked_window) {
+            return Ok(false);
+        }
+
+        // Get the floating window info
+        let float_info = match self.workspaces.current().find_floating(clicked_window) {
+            Some(f) => *f,
+            None => return Ok(false),
+        };
+
+        // Detect if click is near an edge for resizing
+        const EDGE_SIZE: i32 = 8;
+        let local_x = event.event_x as i32;
+        let local_y = event.event_y as i32;
+        let w = float_info.width as i32;
+        let h = float_info.height as i32;
+
+        let at_left = local_x < EDGE_SIZE;
+        let at_right = local_x >= w - EDGE_SIZE;
+        let at_top = local_y < EDGE_SIZE;
+        let at_bottom = local_y >= h - EDGE_SIZE;
+
+        let edge = match (at_top, at_bottom, at_left, at_right) {
+            (true, false, true, false) => Some(ResizeEdge::TopLeft),
+            (true, false, false, true) => Some(ResizeEdge::TopRight),
+            (false, true, true, false) => Some(ResizeEdge::BottomLeft),
+            (false, true, false, true) => Some(ResizeEdge::BottomRight),
+            (true, false, false, false) => Some(ResizeEdge::Top),
+            (false, true, false, false) => Some(ResizeEdge::Bottom),
+            (false, false, true, false) => Some(ResizeEdge::Left),
+            (false, false, false, true) => Some(ResizeEdge::Right),
+            _ => None,
+        };
+
+        // Focus the floating window
+        self.focus_window(clicked_window)?;
+
+        if let Some(resize_edge) = edge {
+            // Start resize drag
+            log::info!("Starting float resize on 0x{:x} edge {:?}", clicked_window, resize_edge);
+
+            self.conn.grab_pointer(
+                false,
+                self.root,
+                EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE, // TODO: Use appropriate resize cursor
+                x11rb::CURRENT_TIME,
+            )?;
+
+            self.drag_state = Some(DragState::FloatResize {
+                window: clicked_window,
+                edge: resize_edge,
+                start_x: event.root_x as i32,
+                start_y: event.root_y as i32,
+                original_x: float_info.x,
+                original_y: float_info.y,
+                original_w: float_info.width,
+                original_h: float_info.height,
+            });
+        } else {
+            // Start move drag
+            log::info!("Starting float move on 0x{:x}", clicked_window);
+
+            self.conn.grab_pointer(
+                false,
+                self.root,
+                EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                x11rb::CURRENT_TIME,
+            )?;
+
+            self.drag_state = Some(DragState::FloatMove {
+                window: clicked_window,
+                start_x: event.root_x as i32,
+                start_y: event.root_y as i32,
+                win_x: float_info.x,
+                win_y: float_info.y,
+            });
+        }
+
+        self.conn.flush()?;
+        Ok(true)
     }
 
     /// Find the drop target for a drag operation
@@ -2357,6 +2817,12 @@ impl Wm {
                 // Resize is complete - nothing more to do
                 // (resizing happens during motion, not on release)
                 log::info!("Resize drag completed");
+            }
+            DragState::FloatMove { window, .. } => {
+                log::info!("Float move completed for window 0x{:x}", window);
+            }
+            DragState::FloatResize { window, edge, .. } => {
+                log::info!("Float resize completed for window 0x{:x} (edge: {:?})", window, edge);
             }
         }
 
@@ -2486,6 +2952,7 @@ impl Wm {
             WmAction::TagWindow => self.tag_focused_window()?,
             WmAction::MoveTaggedToFrame => self.move_tagged_to_focused_frame()?,
             WmAction::UntagAll => self.untag_all_windows()?,
+            WmAction::ToggleFloat => self.toggle_float(None)?,
         }
         Ok(())
     }
@@ -2761,6 +3228,19 @@ impl Wm {
                 let tagged: Vec<u32> = self.tagged_windows.iter().copied().collect();
                 IpcResponse::Tagged { windows: tagged }
             }
+            IpcCommand::ToggleFloat { window } => {
+                match self.toggle_float(window.map(|w| w as Window)) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "toggle_float_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::GetFloating => {
+                let floating: Vec<u32> = self.workspaces.current().floating_window_ids();
+                IpcResponse::Floating { windows: floating }
+            }
             IpcCommand::SwitchWorkspace { index } => {
                 if let Some(old_idx) = self.workspaces.switch_to(index) {
                     match self.perform_workspace_switch(old_idx) {
@@ -2848,10 +3328,12 @@ impl Wm {
             self.usable_screen(),
             self.config.gap,
         );
+        let tiled_count = self.workspaces.current().layout.all_windows().len();
+        let floating_count = self.workspaces.current().floating_windows.len();
         WmStateSnapshot {
             focused_window: self.focused_window,
             focused_frame: self.workspaces.current().layout.focused_frame_id(),
-            window_count: self.workspaces.current().layout.all_windows().len(),
+            window_count: tiled_count + floating_count,
             frame_count: self.workspaces.current().layout.all_frames().len(),
             layout: self.workspaces.current().layout.snapshot(Some(&geometries)),
             windows: self.get_window_info_list(),
@@ -2863,6 +3345,7 @@ impl Wm {
         let mut windows = Vec::new();
         let all_frames = self.workspaces.current().layout.all_frames();
 
+        // Add tiled windows
         for frame_id in all_frames {
             if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
                 let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
@@ -2876,9 +3359,24 @@ impl Wm {
                         is_focused: is_focused_frame && is_focused_tab && self.focused_window == Some(window),
                         is_visible: is_focused_tab, // Only the focused tab is visible
                         is_tagged: self.tagged_windows.contains(&window),
+                        is_floating: false,
                     });
                 }
             }
+        }
+
+        // Add floating windows
+        for fw in &self.workspaces.current().floating_windows {
+            windows.push(WindowInfo {
+                id: fw.window,
+                title: self.get_window_title(fw.window),
+                frame: "floating".to_string(),
+                tab_index: 0,
+                is_focused: self.focused_window == Some(fw.window),
+                is_visible: true, // Floating windows are always visible
+                is_tagged: self.tagged_windows.contains(&fw.window),
+                is_floating: true,
+            });
         }
 
         windows
@@ -2888,10 +3386,12 @@ impl Wm {
     fn validate_state(&self) -> Vec<String> {
         let mut violations = Vec::new();
 
-        // Check: focused window should be in layout
+        // Check: focused window should be in layout or floating
         if let Some(w) = self.focused_window {
-            if self.workspaces.current().layout.find_window(w).is_none() {
-                violations.push(format!("Focused window 0x{:x} is not in layout", w));
+            let in_layout = self.workspaces.current().layout.find_window(w).is_some();
+            let is_floating = self.workspaces.current().is_floating(w);
+            if !in_layout && !is_floating {
+                violations.push(format!("Focused window 0x{:x} is not in layout or floating", w));
             }
         }
 

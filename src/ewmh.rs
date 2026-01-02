@@ -33,6 +33,18 @@ pub struct Atoms {
 
     // Close window request
     pub net_close_window: Atom,
+
+    // Window type atoms (for auto-float detection)
+    pub net_wm_window_type: Atom,
+    pub net_wm_window_type_dialog: Atom,
+    pub net_wm_window_type_splash: Atom,
+    pub net_wm_window_type_toolbar: Atom,
+    pub net_wm_window_type_utility: Atom,
+    pub net_wm_window_type_menu: Atom,
+    pub net_wm_window_type_popup_menu: Atom,
+    pub net_wm_window_type_dropdown_menu: Atom,
+    pub net_wm_window_type_tooltip: Atom,
+    pub net_wm_window_type_notification: Atom,
 }
 
 impl Atoms {
@@ -53,6 +65,16 @@ impl Atoms {
             net_wm_desktop: Self::intern(conn, b"_NET_WM_DESKTOP")?,
             net_wm_icon: Self::intern(conn, b"_NET_WM_ICON")?,
             net_close_window: Self::intern(conn, b"_NET_CLOSE_WINDOW")?,
+            net_wm_window_type: Self::intern(conn, b"_NET_WM_WINDOW_TYPE")?,
+            net_wm_window_type_dialog: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_DIALOG")?,
+            net_wm_window_type_splash: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_SPLASH")?,
+            net_wm_window_type_toolbar: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_TOOLBAR")?,
+            net_wm_window_type_utility: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_UTILITY")?,
+            net_wm_window_type_menu: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_MENU")?,
+            net_wm_window_type_popup_menu: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_POPUP_MENU")?,
+            net_wm_window_type_dropdown_menu: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?,
+            net_wm_window_type_tooltip: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_TOOLTIP")?,
+            net_wm_window_type_notification: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")?,
         })
     }
 

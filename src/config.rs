@@ -96,6 +96,7 @@ pub struct KeybindingConfig {
     pub tag_window: Option<String>,
     pub move_tagged_windows: Option<String>,
     pub untag_all: Option<String>,
+    pub toggle_float: Option<String>,
 }
 
 /// Parsed keybinding (ready for X11 grab)
@@ -131,6 +132,7 @@ pub enum WmAction {
     TagWindow,
     MoveTaggedToFrame,
     UntagAll,
+    ToggleFloat,
 }
 
 impl Config {
@@ -212,6 +214,7 @@ impl Config {
         insert(WmAction::TagWindow, &self.keybindings.tag_window);
         insert(WmAction::MoveTaggedToFrame, &self.keybindings.move_tagged_windows);
         insert(WmAction::UntagAll, &self.keybindings.untag_all);
+        insert(WmAction::ToggleFloat, &self.keybindings.toggle_float);
 
         // Parse exec bindings (key combo -> command)
         for (key_combo, command) in &self.exec.bindings {
@@ -401,6 +404,7 @@ impl Default for KeybindingConfig {
             tag_window: Some("Mod4+t".to_string()),
             move_tagged_windows: Some("Mod4+a".to_string()),
             untag_all: Some("Mod4+Shift+t".to_string()),
+            toggle_float: Some("Mod4+f".to_string()),
         }
     }
 }

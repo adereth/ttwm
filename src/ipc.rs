@@ -76,6 +76,12 @@ pub enum IpcCommand {
     /// Get list of tagged window IDs
     GetTagged,
 
+    // Floating
+    /// Toggle floating state for a window (uses focused window if not specified)
+    ToggleFloat { window: Option<u32> },
+    /// Get list of floating window IDs
+    GetFloating,
+
     // Workspaces
     /// Switch to a specific workspace (0-8)
     SwitchWorkspace { index: usize },
@@ -122,6 +128,8 @@ pub enum IpcResponse {
     Screenshot { path: String },
     /// List of tagged window IDs
     Tagged { windows: Vec<u32> },
+    /// List of floating window IDs
+    Floating { windows: Vec<u32> },
     /// Current workspace info
     Workspace { index: usize, total: usize },
     /// Error response
@@ -149,6 +157,7 @@ pub struct WindowInfo {
     pub is_focused: bool,
     pub is_visible: bool,
     pub is_tagged: bool,
+    pub is_floating: bool,
 }
 
 /// Entry in the event log

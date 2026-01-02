@@ -156,6 +156,15 @@ enum Commands {
     /// Get list of tagged window IDs
     Tagged,
 
+    /// Toggle floating state for a window
+    ToggleFloat {
+        /// Window ID (uses focused if not specified)
+        window: Option<String>,
+    },
+
+    /// Get list of floating window IDs
+    Floating,
+
     /// Switch to a workspace (1-9) or next/prev
     Workspace {
         /// Workspace number (1-9) or "next" or "prev"
@@ -241,6 +250,11 @@ fn main() {
         Commands::MoveTagged => serde_json::json!({"command": "move_tagged"}),
         Commands::UntagAll => serde_json::json!({"command": "untag_all"}),
         Commands::Tagged => serde_json::json!({"command": "get_tagged"}),
+        Commands::ToggleFloat { window } => {
+            let window_id = window.as_ref().map(|w| parse_window_id(w));
+            serde_json::json!({"command": "toggle_float", "window": window_id})
+        }
+        Commands::Floating => serde_json::json!({"command": "get_floating"}),
         Commands::Workspace { target } => {
             let lower = target.to_lowercase();
             if lower == "next" {
