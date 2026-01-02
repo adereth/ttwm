@@ -625,6 +625,13 @@ impl Wm {
             }
         }
 
+        // Hide empty frame windows from old workspace (on focused monitor)
+        for (&(m_id, ws_idx, _), &empty_window) in &self.empty_frame_windows {
+            if m_id == mon_id && ws_idx == old_idx {
+                self.conn.unmap_window(empty_window)?;
+            }
+        }
+
         // Show windows from new workspace (remove from hidden set)
         // Collect window IDs first to avoid borrow conflicts
         let tiled_windows = self.workspaces().current().layout.all_windows();
@@ -801,6 +808,8 @@ impl Wm {
                 &ChangeWindowAttributesAux::new()
                     .border_pixel(border_color),
             )?;
+            // Re-map in case it was hidden (e.g., workspace switch)
+            self.conn.map_window(window)?;
             return Ok(window);
         }
 
