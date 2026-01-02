@@ -773,21 +773,11 @@ impl Wm {
         Some(reply.data)
     }
 
-    /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
-    fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
-        let frame = match self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
-            Some(f) => f,
-            None => return Ok(()),
-        };
-
-        let num_tabs = frame.windows.len();
+    /// Draw the pseudo-transparent background for a tab bar.
+    fn draw_tab_bar_background(&mut self, window: Window, rect: &Rect) -> Result<()> {
         let height = self.config.tab_bar_height;
-        let h_padding: i16 = 12;    // Horizontal text padding
-        let corner_radius: u32 = 6; // Rounded corner radius
-        let icon_size: u32 = 20;    // Icon size in pixels
-        let icon_padding: i16 = 4;  // Padding after icon
 
-        // Always clear first with solid color to ensure old content is erased
+        // Clear with solid color first to ensure old content is erased
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
         self.conn.poly_fill_rectangle(
             window,
@@ -800,7 +790,7 @@ impl Wm {
             }],
         )?;
 
-        // Then sample and draw root background on top (pseudo-transparency)
+        // Sample and draw root background on top (pseudo-transparency)
         if let Some(pixels) = self.sample_root_background(
             rect.x as i16,
             rect.y as i16,
@@ -820,24 +810,217 @@ impl Wm {
             )?;
         }
 
-        // Empty frame - show focus indicator if focused
-        if num_tabs == 0 {
-            let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
+        Ok(())
+    }
+
+    /// Draw the focus indicator for an empty frame.
+    fn draw_empty_frame_indicator(&mut self, window: Window, rect: &Rect) -> Result<()> {
+        let accent_height = 3u16;
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_focused_bg))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: rect.width as u16,
+                height: accent_height,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Draw a single tab in the tab bar.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_single_tab(
+        &mut self,
+        window: Window,
+        x: i16,
+        tab_width: u32,
+        client_window: Window,
+        is_focused: bool,
+        is_last: bool,
+        is_tagged: bool,
+        is_focused_frame: bool,
+        show_icons: bool,
+    ) -> Result<()> {
+        let height = self.config.tab_bar_height;
+        let h_padding: i16 = 12;    // Horizontal text padding
+        let corner_radius: u32 = 6; // Rounded corner radius
+        let icon_size: u32 = 20;    // Icon size in pixels
+        let icon_padding: i16 = 4;  // Padding after icon
+
+        // Tab background color (4 states: tagged, focused frame visible, unfocused frame visible, background)
+        let bg_color = if is_tagged {
+            self.config.tab_tagged_bg
+        } else if is_focused {
             if is_focused_frame {
-                // Draw accent line at top to indicate this empty frame is focused
-                let accent_height = 3u16;
-                let gc_values = ChangeGCAux::new().foreground(self.config.tab_focused_bg);
-                self.conn.change_gc(self.gc, &gc_values)?;
-                self.conn.poly_fill_rectangle(
+                self.config.tab_focused_bg
+            } else {
+                self.config.tab_visible_unfocused_bg
+            }
+        } else {
+            self.config.tab_unfocused_bg
+        };
+
+        // Draw drop shadow for focused tabs (before tab background so it appears behind)
+        if is_focused {
+            let shadow_color = darken_color(bg_color, 0.3);
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(shadow_color))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: x + 2,
+                    y: (height - 2) as i16,
+                    width: tab_width as u16,
+                    height: 3,
+                }],
+            )?;
+        }
+
+        // Draw tab background with rounded top corners
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
+        self.draw_rounded_top_rect(window, x, 0, tab_width, height, corner_radius)?;
+
+        // Draw bevel effect for 3D raised appearance
+        let bevel_light = lighten_color(bg_color, 0x20);
+        let bevel_dark = darken_color(bg_color, 0.7);
+
+        // Top highlight (inside rounded corners)
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_light))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: x + corner_radius as i16,
+                y: 1,
+                width: (tab_width - corner_radius * 2) as u16,
+                height: 1,
+            }],
+        )?;
+
+        // Bottom shadow line
+        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
+        self.conn.poly_fill_rectangle(
+            window,
+            self.gc,
+            &[Rectangle {
+                x: x,
+                y: (height - 1) as i16,
+                width: tab_width as u16,
+                height: 1,
+            }],
+        )?;
+
+        // Draw separator on right edge for unfocused tabs (except last)
+        if !is_focused && !is_last {
+            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
+            self.conn.poly_fill_rectangle(
+                window,
+                self.gc,
+                &[Rectangle {
+                    x: x + tab_width as i16 - 1,
+                    y: 4,
+                    width: 1,
+                    height: (height - 8) as u16,
+                }],
+            )?;
+        }
+
+        // Calculate content offset (shifts right if icon is present)
+        let mut content_offset: i16 = 0;
+
+        // Draw icon if enabled
+        if show_icons {
+            if let Some(icon) = self.get_window_icon(client_window) {
+                // Blend icon with tab background and render
+                let blended = blend_icon_with_background(&icon.pixels, bg_color, icon_size);
+
+                let icon_x = x + h_padding;
+                let icon_y = ((height - icon_size) / 2) as i16;
+
+                self.conn.put_image(
+                    ImageFormat::Z_PIXMAP,
                     window,
                     self.gc,
-                    &[Rectangle {
-                        x: 0,
-                        y: 0,
-                        width: rect.width as u16,
-                        height: accent_height,
-                    }],
+                    icon_size as u16,
+                    icon_size as u16,
+                    icon_x,
+                    icon_y,
+                    0,
+                    24, // 24-bit depth
+                    &blended,
                 )?;
+
+                content_offset = icon_size as i16 + icon_padding;
+            } else {
+                // No icon available, but still reserve space for consistency
+                content_offset = icon_size as i16 + icon_padding;
+            }
+        }
+
+        // Get window title and truncate if needed
+        let title = self.get_window_title(client_window);
+        let available_width = (tab_width as i32 - h_padding as i32 * 2 - content_offset as i32).max(0) as u32;
+        let display_title = self.font_renderer.truncate_text_to_width(&title, available_width);
+
+        // Text color (dimmer for background tabs)
+        let text_color = if is_focused {
+            self.config.tab_text_color
+        } else {
+            self.config.tab_text_unfocused
+        };
+
+        // Render text with FreeType
+        let (pixels, text_width, text_height) = self.font_renderer.render_text(
+            &display_title,
+            text_color,
+            bg_color,
+        );
+
+        if !pixels.is_empty() && text_width > 0 && text_height > 0 {
+            // Calculate text position (vertically centered, after icon)
+            let text_x = x + h_padding + content_offset;
+            let text_y = ((height - text_height) / 2) as i16;
+
+            // Draw text using put_image
+            self.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                window,
+                self.gc,
+                text_width as u16,
+                text_height as u16,
+                text_x,
+                text_y,
+                0,
+                24, // depth (24-bit color, will be padded to 32)
+                &pixels,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
+    fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect) -> Result<()> {
+        // Extract all needed data from frame before any mutable calls
+        let (windows, focused_tab, is_empty) = {
+            let frame = match self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+                Some(f) => f,
+                None => return Ok(()),
+            };
+            (frame.windows.clone(), frame.focused, frame.windows.is_empty())
+        };
+
+        // Draw pseudo-transparent background
+        self.draw_tab_bar_background(window, rect)?;
+
+        // Empty frame - show focus indicator if focused
+        if is_empty {
+            let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
+            if is_focused_frame {
+                self.draw_empty_frame_indicator(window, rect)?;
             }
             return Ok(());
         }
@@ -847,173 +1030,27 @@ impl Wm {
 
         // Check if this frame is the focused frame
         let is_focused_frame = frame_id == self.workspaces.current().layout.focused;
-
-        // Collect windows and focused index before the loop (to avoid borrow issues)
-        let windows: Vec<Window> = frame.windows.clone();
-        let focused_tab = frame.focused;
         let show_icons = self.config.show_tab_icons;
+        let num_tabs = windows.len();
 
         // Draw each tab
         for (i, &client_window) in windows.iter().enumerate() {
             let (x, tab_width) = tab_layout[i];
             let is_focused = i == focused_tab;
             let is_last = i == num_tabs - 1;
+            let is_tagged = self.tagged_windows.contains(&client_window);
 
-            // Tab background color (4 states: tagged, focused frame visible, unfocused frame visible, background)
-            let bg_color = if self.tagged_windows.contains(&client_window) {
-                self.config.tab_tagged_bg
-            } else if is_focused {
-                if is_focused_frame {
-                    self.config.tab_focused_bg
-                } else {
-                    self.config.tab_visible_unfocused_bg
-                }
-            } else {
-                self.config.tab_unfocused_bg
-            };
-
-            // Draw drop shadow for focused tabs (before tab background so it appears behind)
-            if is_focused {
-                let shadow_color = darken_color(bg_color, 0.3);
-                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(shadow_color))?;
-                self.conn.poly_fill_rectangle(
-                    window,
-                    self.gc,
-                    &[Rectangle {
-                        x: x + 2,
-                        y: (height - 2) as i16,
-                        width: tab_width as u16,
-                        height: 3,
-                    }],
-                )?;
-            }
-
-            // Draw tab background with rounded top corners
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
-            self.draw_rounded_top_rect(
+            self.draw_single_tab(
                 window,
                 x,
-                0,
                 tab_width,
-                height,
-                corner_radius,
+                client_window,
+                is_focused,
+                is_last,
+                is_tagged,
+                is_focused_frame,
+                show_icons,
             )?;
-
-            // Draw bevel effect for 3D raised appearance
-            let bevel_light = lighten_color(bg_color, 0x20);
-            let bevel_dark = darken_color(bg_color, 0.7);
-
-            // Top highlight (inside rounded corners)
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_light))?;
-            self.conn.poly_fill_rectangle(
-                window,
-                self.gc,
-                &[Rectangle {
-                    x: x + corner_radius as i16,
-                    y: 1,
-                    width: (tab_width - corner_radius * 2) as u16,
-                    height: 1,
-                }],
-            )?;
-
-            // Bottom shadow line
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
-            self.conn.poly_fill_rectangle(
-                window,
-                self.gc,
-                &[Rectangle {
-                    x: x,
-                    y: (height - 1) as i16,
-                    width: tab_width as u16,
-                    height: 1,
-                }],
-            )?;
-
-            if !is_focused && !is_last {
-                // Draw separator on right edge for unfocused tabs
-                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
-                self.conn.poly_fill_rectangle(
-                    window,
-                    self.gc,
-                    &[Rectangle {
-                        x: x + tab_width as i16 - 1,
-                        y: 4,
-                        width: 1,
-                        height: (height - 8) as u16,
-                    }],
-                )?;
-            }
-
-            // Calculate content offset (shifts right if icon is present)
-            let mut content_offset: i16 = 0;
-
-            // Draw icon if enabled
-            if show_icons {
-                if let Some(icon) = self.get_window_icon(client_window) {
-                    // Blend icon with tab background and render
-                    let blended = blend_icon_with_background(&icon.pixels, bg_color, icon_size);
-
-                    let icon_x = x + h_padding;
-                    let icon_y = ((height - icon_size) / 2) as i16;
-
-                    self.conn.put_image(
-                        ImageFormat::Z_PIXMAP,
-                        window,
-                        self.gc,
-                        icon_size as u16,
-                        icon_size as u16,
-                        icon_x,
-                        icon_y,
-                        0,
-                        24, // 24-bit depth
-                        &blended,
-                    )?;
-
-                    content_offset = icon_size as i16 + icon_padding;
-                } else {
-                    // No icon available, but still reserve space for consistency
-                    content_offset = icon_size as i16 + icon_padding;
-                }
-            }
-
-            // Get window title and truncate if needed
-            let title = self.get_window_title(client_window);
-            let available_width = (tab_width as i32 - h_padding as i32 * 2 - content_offset as i32).max(0) as u32;
-            let display_title = self.font_renderer.truncate_text_to_width(&title, available_width);
-
-            // Text color (dimmer for background tabs)
-            let text_color = if is_focused {
-                self.config.tab_text_color
-            } else {
-                self.config.tab_text_unfocused
-            };
-
-            // Render text with FreeType
-            let (pixels, text_width, text_height) = self.font_renderer.render_text(
-                &display_title,
-                text_color,
-                bg_color,
-            );
-
-            if !pixels.is_empty() && text_width > 0 && text_height > 0 {
-                // Calculate text position (vertically centered, after icon)
-                let text_x = x + h_padding + content_offset;
-                let text_y = ((height - text_height) / 2) as i16;
-
-                // Draw text using put_image
-                self.conn.put_image(
-                    ImageFormat::Z_PIXMAP,
-                    window,
-                    self.gc,
-                    text_width as u16,
-                    text_height as u16,
-                    text_x,
-                    text_y,
-                    0,
-                    24, // depth (24-bit color, will be padded to 32)
-                    &pixels,
-                )?;
-            }
         }
 
         Ok(())
@@ -2043,76 +2080,83 @@ impl Wm {
         Ok(())
     }
 
-    /// Handle button press event (click on tab bar or gap for resize)
-    fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
-        // Check if click is on root window (potential gap resize)
-        if event.event == self.root && event.detail == 1 {
-            let screen = self.usable_screen();
-            if let Some((split_id, direction, split_start, total_size)) =
-                self.workspaces.current().layout.find_split_at_gap(screen, self.config.gap, event.root_x as i32, event.root_y as i32)
-            {
-                // Select the appropriate resize cursor based on split direction
-                let resize_cursor = match direction {
-                    SplitDirection::Horizontal => self.cursor_resize_h,
-                    SplitDirection::Vertical => self.cursor_resize_v,
-                };
+    /// Try to handle a gap resize drag initiation.
+    /// Returns Ok(true) if the click started a resize operation, Ok(false) otherwise.
+    fn try_handle_gap_resize(&mut self, event: &ButtonPressEvent) -> Result<bool> {
+        // Only handle left-clicks on root window
+        if event.event != self.root || event.detail != 1 {
+            return Ok(false);
+        }
 
-                // Start resize drag - grab pointer to track motion
-                self.conn.grab_pointer(
-                    false,
-                    self.root,
-                    EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
-                    x11rb::NONE,  // confine_to
-                    resize_cursor,
-                    x11rb::CURRENT_TIME,
-                )?;
+        let screen = self.usable_screen();
+        if let Some((split_id, direction, split_start, total_size)) =
+            self.workspaces.current().layout.find_split_at_gap(screen, self.config.gap, event.root_x as i32, event.root_y as i32)
+        {
+            // Select the appropriate resize cursor based on split direction
+            let resize_cursor = match direction {
+                SplitDirection::Horizontal => self.cursor_resize_h,
+                SplitDirection::Vertical => self.cursor_resize_v,
+            };
 
-                self.drag_state = Some(DragState::Resize {
-                    split_id,
-                    direction,
-                    split_start,
-                    total_size,
-                });
+            // Start resize drag - grab pointer to track motion
+            self.conn.grab_pointer(
+                false,
+                self.root,
+                EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                x11rb::NONE,  // confine_to
+                resize_cursor,
+                x11rb::CURRENT_TIME,
+            )?;
 
-                log::info!("Started gap resize for {:?} split", direction);
-                return Ok(());
-            }
+            self.drag_state = Some(DragState::Resize {
+                split_id,
+                direction,
+                split_start,
+                total_size,
+            });
 
-            // Check if click is in an empty frame's area
-            let geometries = self.workspaces.current().layout.calculate_geometries(screen, self.config.gap);
-            for (frame_id, rect) in &geometries {
-                if let Some(frame) = self.workspaces.current().layout.get(*frame_id).and_then(|n| n.as_frame()) {
-                    if frame.is_empty() {
-                        let click_x = event.root_x as i32;
-                        let click_y = event.root_y as i32;
-                        if click_x >= rect.x && click_x < rect.x + rect.width as i32 &&
-                           click_y >= rect.y && click_y < rect.y + rect.height as i32 {
-                            // Focus this empty frame
-                            self.workspaces.current_mut().layout.focused = *frame_id;
-                            self.apply_layout()?;
-                            return Ok(());
-                        }
+            log::info!("Started gap resize for {:?} split", direction);
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Try to handle a click on an empty frame area.
+    /// Returns Ok(true) if an empty frame was focused, Ok(false) otherwise.
+    fn try_handle_empty_frame_click(&mut self, event: &ButtonPressEvent) -> Result<bool> {
+        // Only handle left-clicks on root window
+        if event.event != self.root || event.detail != 1 {
+            return Ok(false);
+        }
+
+        let screen = self.usable_screen();
+        let geometries = self.workspaces.current().layout.calculate_geometries(screen, self.config.gap);
+
+        for (frame_id, rect) in &geometries {
+            if let Some(frame) = self.workspaces.current().layout.get(*frame_id).and_then(|n| n.as_frame()) {
+                if frame.is_empty() {
+                    let click_x = event.root_x as i32;
+                    let click_y = event.root_y as i32;
+                    if click_x >= rect.x && click_x < rect.x + rect.width as i32 &&
+                       click_y >= rect.y && click_y < rect.y + rect.height as i32 {
+                        // Focus this empty frame
+                        self.workspaces.current_mut().layout.focused = *frame_id;
+                        self.apply_layout()?;
+                        return Ok(true);
                     }
                 }
             }
         }
 
-        // Find which frame's tab bar was clicked
-        let ws_idx = self.workspaces.current_index();
-        let mut clicked_frame = None;
-        for (&(idx, frame_id), &tab_window) in &self.tab_bar_windows {
-            if idx == ws_idx && tab_window == event.event {
-                clicked_frame = Some(frame_id);
-                break;
-            }
-        }
+        Ok(false)
+    }
 
-        let frame_id = match clicked_frame {
-            Some(id) => id,
-            None => return Ok(()),
-        };
+    /// Handle a click on a tab bar (tab selection, drag, or middle-click removal).
+    fn handle_tab_click(&mut self, event: &ButtonPressEvent, frame_id: NodeId) -> Result<()> {
+        let ws_idx = self.workspaces.current_index();
 
         // Handle middle click - remove empty frame
         if event.detail == 2 {
@@ -2136,61 +2180,76 @@ impl Wm {
             return Ok(());
         }
 
-        // Get frame geometry
-        let screen_rect = self.usable_screen();
-        let geometries = self.workspaces.current().layout.calculate_geometries(screen_rect, self.config.gap);
-
-        for (fid, _rect) in geometries {
-            if fid == frame_id {
-                if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
-                    let num_tabs = frame.windows.len();
-                    if num_tabs == 0 {
-                        // Focus the empty frame
-                        self.workspaces.current_mut().layout.focused = frame_id;
-                        self.apply_layout()?;
-                        break;
-                    }
-
-                    // Calculate which tab was clicked using content-based layout
-                    let tab_layout = self.calculate_tab_layout(frame_id);
-                    let click_x = event.event_x as i16;
-                    let clicked_tab = tab_layout.iter().enumerate()
-                        .find(|(_, (x, w))| click_x >= *x && click_x < *x + *w as i16)
-                        .map(|(i, _)| i);
-
-                    if let Some(clicked_tab) = clicked_tab {
-                        // Get the window at this tab
-                        let window = frame.windows[clicked_tab];
-
-                        // Focus this tab immediately
-                        if let Some(w) = self.workspaces.current_mut().layout.focus_tab(clicked_tab) {
-                            self.apply_layout()?;
-                            self.focus_window(w)?;
-                        }
-
-                        // Start drag operation - grab pointer to track motion
-                        self.conn.grab_pointer(
-                            false,
-                            self.root,
-                            EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
-                            GrabMode::ASYNC,
-                            GrabMode::ASYNC,
-                            x11rb::NONE,  // confine_to
-                            x11rb::NONE,  // cursor
-                            x11rb::CURRENT_TIME,
-                        )?;
-
-                        self.drag_state = Some(DragState::Tab {
-                            window,
-                            source_frame: frame_id,
-                            source_index: clicked_tab,
-                        });
-
-                        log::info!("Started drag for tab {} (window 0x{:x})", clicked_tab + 1, window);
-                    }
-                }
-                break;
+        // Get frame and handle click
+        if let Some(frame) = self.workspaces.current().layout.get(frame_id).and_then(|n| n.as_frame()) {
+            let num_tabs = frame.windows.len();
+            if num_tabs == 0 {
+                // Focus the empty frame
+                self.workspaces.current_mut().layout.focused = frame_id;
+                self.apply_layout()?;
+                return Ok(());
             }
+
+            // Calculate which tab was clicked using content-based layout
+            let tab_layout = self.calculate_tab_layout(frame_id);
+            let click_x = event.event_x as i16;
+            let clicked_tab = tab_layout.iter().enumerate()
+                .find(|(_, (x, w))| click_x >= *x && click_x < *x + *w as i16)
+                .map(|(i, _)| i);
+
+            if let Some(clicked_tab) = clicked_tab {
+                // Get the window at this tab
+                let window = frame.windows[clicked_tab];
+
+                // Focus this tab immediately
+                if let Some(w) = self.workspaces.current_mut().layout.focus_tab(clicked_tab) {
+                    self.apply_layout()?;
+                    self.focus_window(w)?;
+                }
+
+                // Start drag operation - grab pointer to track motion
+                self.conn.grab_pointer(
+                    false,
+                    self.root,
+                    EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    x11rb::NONE,  // confine_to
+                    x11rb::NONE,  // cursor
+                    x11rb::CURRENT_TIME,
+                )?;
+
+                self.drag_state = Some(DragState::Tab {
+                    window,
+                    source_frame: frame_id,
+                    source_index: clicked_tab,
+                });
+
+                log::info!("Started drag for tab {} (window 0x{:x})", clicked_tab + 1, window);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle button press event (click on tab bar or gap for resize)
+    fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
+        // Check for gap resize or empty frame click on root window
+        if self.try_handle_gap_resize(&event)? {
+            return Ok(());
+        }
+        if self.try_handle_empty_frame_click(&event)? {
+            return Ok(());
+        }
+
+        // Find which frame's tab bar was clicked
+        let ws_idx = self.workspaces.current_index();
+        let clicked_frame = self.tab_bar_windows.iter()
+            .find(|(&(idx, _), &tab_window)| idx == ws_idx && tab_window == event.event)
+            .map(|(&(_, frame_id), _)| frame_id);
+
+        if let Some(frame_id) = clicked_frame {
+            self.handle_tab_click(&event, frame_id)?;
         }
 
         Ok(())
