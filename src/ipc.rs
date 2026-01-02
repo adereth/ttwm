@@ -82,6 +82,12 @@ pub enum IpcCommand {
     /// Get list of floating window IDs
     GetFloating,
 
+    // Urgent
+    /// Get list of urgent window IDs (ordered oldest first)
+    GetUrgent,
+    /// Focus the oldest urgent window
+    FocusUrgent,
+
     // Workspaces
     /// Switch to a specific workspace (0-8)
     SwitchWorkspace { index: usize },
@@ -130,6 +136,8 @@ pub enum IpcResponse {
     Tagged { windows: Vec<u32> },
     /// List of floating window IDs
     Floating { windows: Vec<u32> },
+    /// List of urgent window IDs (ordered oldest first)
+    Urgent { windows: Vec<u32> },
     /// Current workspace info
     Workspace { index: usize, total: usize },
     /// Error response
@@ -158,6 +166,7 @@ pub struct WindowInfo {
     pub is_visible: bool,
     pub is_tagged: bool,
     pub is_floating: bool,
+    pub is_urgent: bool,
 }
 
 /// Entry in the event log
@@ -442,6 +451,7 @@ mod tests {
             is_visible: true,
             is_tagged: false,
             is_floating: true,
+            is_urgent: false,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"is_floating\":true"));
@@ -455,8 +465,88 @@ mod tests {
             is_visible: true,
             is_tagged: false,
             is_floating: false,
+            is_urgent: false,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"is_floating\":false"));
+    }
+
+    #[test]
+    fn test_get_urgent_command_serialization() {
+        let cmd = IpcCommand::GetUrgent;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("get_urgent"));
+    }
+
+    #[test]
+    fn test_get_urgent_command_deserialization() {
+        let json = r#"{"command": "get_urgent"}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, IpcCommand::GetUrgent));
+    }
+
+    #[test]
+    fn test_focus_urgent_command_serialization() {
+        let cmd = IpcCommand::FocusUrgent;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("focus_urgent"));
+    }
+
+    #[test]
+    fn test_focus_urgent_command_deserialization() {
+        let json = r#"{"command": "focus_urgent"}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd, IpcCommand::FocusUrgent));
+    }
+
+    #[test]
+    fn test_urgent_response_serialization() {
+        let resp = IpcResponse::Urgent {
+            windows: vec![100, 200, 300],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("urgent"));
+        assert!(json.contains("100"));
+        assert!(json.contains("200"));
+        assert!(json.contains("300"));
+    }
+
+    #[test]
+    fn test_urgent_response_empty() {
+        let resp = IpcResponse::Urgent { windows: vec![] };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("urgent"));
+        assert!(json.contains("[]"));
+    }
+
+    #[test]
+    fn test_window_info_with_is_urgent() {
+        let info = WindowInfo {
+            id: 12345,
+            title: "Urgent Window".to_string(),
+            frame: "frame_1".to_string(),
+            tab_index: 0,
+            is_focused: false,
+            is_visible: true,
+            is_tagged: false,
+            is_floating: false,
+            is_urgent: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"is_urgent\":true"));
+
+        let info = WindowInfo {
+            id: 12345,
+            title: "Normal Window".to_string(),
+            frame: "frame_1".to_string(),
+            tab_index: 0,
+            is_focused: false,
+            is_visible: true,
+            is_tagged: false,
+            is_floating: false,
+            is_urgent: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"is_urgent\":false"));
     }
 }

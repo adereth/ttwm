@@ -55,6 +55,7 @@ pub struct ColorConfig {
     pub tab_unfocused_bg: String,
     pub tab_visible_unfocused_bg: String,
     pub tab_tagged_bg: String,
+    pub tab_urgent_bg: String,
     pub tab_text: String,
     pub tab_text_unfocused: String,
     pub tab_separator: String,
@@ -97,6 +98,7 @@ pub struct KeybindingConfig {
     pub move_tagged_windows: Option<String>,
     pub untag_all: Option<String>,
     pub toggle_float: Option<String>,
+    pub focus_urgent: Option<String>,
 }
 
 /// Parsed keybinding (ready for X11 grab)
@@ -133,6 +135,7 @@ pub enum WmAction {
     MoveTaggedToFrame,
     UntagAll,
     ToggleFloat,
+    FocusUrgent,
 }
 
 impl Config {
@@ -215,6 +218,7 @@ impl Config {
         insert(WmAction::MoveTaggedToFrame, &self.keybindings.move_tagged_windows);
         insert(WmAction::UntagAll, &self.keybindings.untag_all);
         insert(WmAction::ToggleFloat, &self.keybindings.toggle_float);
+        insert(WmAction::FocusUrgent, &self.keybindings.focus_urgent);
 
         // Parse exec bindings (key combo -> command)
         for (key_combo, command) in &self.exec.bindings {
@@ -362,6 +366,7 @@ impl Default for ColorConfig {
             tab_unfocused_bg: "#3a3a3a".to_string(),
             tab_visible_unfocused_bg: "#4a6a9a".to_string(),
             tab_tagged_bg: "#e06c75".to_string(),
+            tab_urgent_bg: "#d19a66".to_string(),
             tab_text: "#ffffff".to_string(),
             tab_text_unfocused: "#888888".to_string(),
             tab_separator: "#4a4a4a".to_string(),
@@ -405,6 +410,7 @@ impl Default for KeybindingConfig {
             move_tagged_windows: Some("Mod4+a".to_string()),
             untag_all: Some("Mod4+Shift+t".to_string()),
             toggle_float: Some("Mod4+f".to_string()),
+            focus_urgent: Some("Mod4+space".to_string()),
         }
     }
 }

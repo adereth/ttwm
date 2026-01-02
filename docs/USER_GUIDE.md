@@ -44,6 +44,25 @@ ttwm provides **9 virtual workspaces** (desktops). Each workspace maintains its 
 
 You can manually toggle any window between tiled and floating mode with `Mod4+f`. Floating windows are per-workspace (hidden when you switch workspaces).
 
+### Urgent Windows
+
+**Urgent windows** are windows that request attention using the `_NET_WM_STATE_DEMANDS_ATTENTION` hint. This is typically triggered by:
+
+- Terminal bell (`echo -e '\a'`)
+- Chat applications receiving messages
+- Download completion notifications
+- Any application requesting user attention
+
+When a window becomes urgent:
+- Its tab turns **orange/amber** (configurable via `tab_urgent_bg`)
+- If the urgent window is on another workspace, a small **orange indicator** appears in the upper-right corner of the screen
+
+**Clearing urgent state:**
+- Focus the urgent window (the orange highlight clears automatically)
+- Use `Mod4+Space` to jump to the oldest urgent window
+
+Urgent windows are handled in FIFO order (first-in, first-out), so `Mod4+Space` always focuses the window that has been waiting longest for attention.
+
 ---
 
 ## Installation
@@ -183,6 +202,12 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 | `Mod4+t` | Toggle tag on focused window |
 | `Mod4+a` | Move all tagged windows to focused frame |
 | `Mod4+Shift+t` | Untag all windows |
+
+### Urgent Windows
+
+| Shortcut | Action |
+|----------|--------|
+| `Mod4+Space` | Focus oldest urgent window (jumps to other workspace if needed) |
 
 ---
 
@@ -384,6 +409,10 @@ ttwmctl tagged                 # List tagged window IDs
 ttwmctl toggle-float           # Toggle floating for focused window
 ttwmctl toggle-float 0x1c00004 # Toggle floating for specific window
 ttwmctl floating               # List floating window IDs
+
+# Urgent window commands
+ttwmctl urgent                 # List urgent window IDs (oldest first)
+ttwmctl focus-urgent           # Focus oldest urgent window
 
 # Workspace commands
 ttwmctl workspace 3            # Switch to workspace 3

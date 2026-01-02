@@ -26,6 +26,8 @@ tab_unfocused_bg = "#3a3a3a"
 tab_visible_unfocused_bg = "#4a6a9a"
 # Tagged window tab background
 tab_tagged_bg = "#e06c75"
+# Urgent window tab background (demands attention)
+tab_urgent_bg = "#d19a66"
 tab_text = "#ffffff"
 # Text color for background tabs
 tab_text_unfocused = "#888888"
@@ -86,6 +88,9 @@ workspace_prev = "Mod4+["
 tag_window = "Mod4+t"
 move_tagged_windows = "Mod4+a"
 untag_all = "Mod4+Shift+t"
+
+# Urgent windows
+focus_urgent = "Mod4+space"
 
 [exec]
 # Run programs with keybindings
