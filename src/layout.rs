@@ -568,82 +568,6 @@ impl LayoutTree {
         }
     }
 
-    /// Remove empty frames from the tree
-    /// Returns true if any cleanup was performed
-    pub fn remove_empty_frames(&mut self) -> bool {
-        let mut changed = false;
-
-        loop {
-            // Find an empty frame that isn't the only node
-            let empty_frame = self.nodes.iter()
-                .find(|(id, node)| {
-                    if let Node::Frame { frame, .. } = node {
-                        frame.is_empty() && *id != self.root
-                    } else {
-                        false
-                    }
-                })
-                .map(|(id, _)| id);
-
-            let frame_id = match empty_frame {
-                Some(id) => id,
-                None => break, // No more empty frames to remove
-            };
-
-            // Get the parent split
-            let parent_id = match self.parent(frame_id) {
-                Some(id) => id,
-                None => break, // This shouldn't happen for non-root frames
-            };
-
-            // Get the sibling
-            let sibling_id = if let Some(Node::Split { split, .. }) = self.nodes.get(parent_id) {
-                if split.first == frame_id {
-                    split.second
-                } else {
-                    split.first
-                }
-            } else {
-                break;
-            };
-
-            // Get grandparent
-            let grandparent_id = self.parent(parent_id);
-
-            // Replace parent split with sibling
-            if let Some(gp_id) = grandparent_id {
-                // Update grandparent's child reference
-                if let Some(Node::Split { split: gp_split, .. }) = self.nodes.get_mut(gp_id) {
-                    if gp_split.first == parent_id {
-                        gp_split.first = sibling_id;
-                    } else {
-                        gp_split.second = sibling_id;
-                    }
-                }
-                // Update sibling's parent
-                self.set_parent(sibling_id, Some(gp_id));
-            } else {
-                // Parent was root, sibling becomes new root
-                self.root = sibling_id;
-                self.set_parent(sibling_id, None);
-            }
-
-            // Remove the empty frame and the parent split
-            self.nodes.remove(frame_id);
-            self.nodes.remove(parent_id);
-
-            // Update focused if needed
-            if self.focused == frame_id {
-                // Focus the first frame we can find
-                self.focused = self.all_frames().first().copied().unwrap_or(self.root);
-            }
-
-            changed = true;
-        }
-
-        changed
-    }
-
     /// Remove a specific empty frame by ID
     /// Returns true if the frame was removed
     pub fn remove_frame_by_id(&mut self, frame_id: NodeId) -> bool {
@@ -1307,49 +1231,6 @@ mod tests {
 
         let result = tree.focus_tab(5);
         assert!(result.is_none());
-    }
-
-    // ==================== Empty Frame Cleanup Tests ====================
-
-    #[test]
-    fn test_remove_empty_frames_single_frame() {
-        let mut tree = LayoutTree::new();
-
-        // Single empty frame at root should NOT be removed
-        let changed = tree.remove_empty_frames();
-        assert!(!changed);
-        assert_eq!(tree.all_frames().len(), 1);
-    }
-
-    #[test]
-    fn test_remove_empty_frames_after_split() {
-        let mut tree = LayoutTree::new();
-        tree.add_window(1001);
-        tree.split_focused(SplitDirection::Horizontal);
-
-        // Now we have: [frame with window] | [empty frame (focused)]
-        // The empty frame should be removed
-        let changed = tree.remove_empty_frames();
-        assert!(changed);
-
-        // Should be back to 1 frame
-        assert_eq!(tree.all_frames().len(), 1);
-    }
-
-    #[test]
-    fn test_remove_empty_frames_preserves_windows() {
-        let mut tree = LayoutTree::new();
-        tree.add_window(1001);
-        tree.split_focused(SplitDirection::Horizontal);
-        tree.add_window(1002);
-
-        // Remove 1002, making the second frame empty
-        tree.remove_window(1002);
-        tree.remove_empty_frames();
-
-        // Window 1001 should still exist
-        assert!(tree.find_window(1001).is_some());
-        assert_eq!(tree.all_windows().len(), 1);
     }
 
     // ==================== Move Window Tests ====================
