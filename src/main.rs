@@ -2447,6 +2447,10 @@ impl Wm {
                     // Redraw tab bars that might show this window
                     self.redraw_tabs_for_window(e.window)?;
                 }
+                // Redraw tab bar if title changed
+                if e.atom == self.atoms.net_wm_name || e.atom == u32::from(AtomEnum::WM_NAME) {
+                    self.redraw_tabs_for_window(e.window)?;
+                }
             }
 
             Event::ButtonPress(e) => {
