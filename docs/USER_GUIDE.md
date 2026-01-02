@@ -21,6 +21,8 @@ ttwm (Tabbed Tiling Window Manager) is a minimal X11 tiling window manager inspi
 
 A **frame** is a rectangular area on the screen that can hold one or more windows. When a frame contains multiple windows, they are displayed as tabs at the top of the frame. Only one window (the focused tab) is visible at a time; the others are hidden but remain managed.
 
+**Empty frames** (created by splitting) display a bordered placeholder in the content area. The border color indicates focus state: blue when focused, gray when unfocused. Click on an empty frame to focus it, then open a new window to place it there.
+
 ### Tabs
 
 **Tabs** are windows stacked within a single frame. Each tab shows a title in the tab bar at the top of the frame. Click a tab or use keyboard shortcuts to switch between tabs. The focused tab has a highlighted background color.
