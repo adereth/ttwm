@@ -819,9 +819,9 @@ impl Wm {
         let key = (mon_id, ws_idx, frame_id);
 
         let border = self.config.border_width;
-        let tab_bar_height = self.config.tab_bar_height;
-        let client_y = rect.y + tab_bar_height as i32;
-        let client_height = rect.height.saturating_sub(tab_bar_height);
+        // Empty frames use the full rect (no tab bar)
+        let client_y = rect.y;
+        let client_height = rect.height;
         let border_color = if is_focused {
             self.config.border_focused
         } else {
@@ -1801,9 +1801,12 @@ impl Wm {
 
         for fd in &frame_data {
             // Calculate client area based on tab orientation
-            // Always show tab bar, even for empty frames (to allow middle-click removal)
-            let has_tabs = true;
-            let (client_x, client_y, client_width, client_height) = if fd.vertical_tabs {
+            // Only show tab bar for frames with windows
+            let has_tabs = !fd.windows.is_empty();
+            let (client_x, client_y, client_width, client_height) = if !has_tabs {
+                // Empty frame: use full area (no tab bar)
+                (fd.rect.x, fd.rect.y, fd.rect.width, fd.rect.height)
+            } else if fd.vertical_tabs {
                 // Vertical tabs: client area is to the right of the tab bar
                 (
                     fd.rect.x + vertical_tab_width as i32,
@@ -1815,9 +1818,9 @@ impl Wm {
                 // Horizontal tabs: client area is below the tab bar
                 (
                     fd.rect.x,
-                    if has_tabs { fd.rect.y + tab_bar_height as i32 } else { fd.rect.y },
+                    fd.rect.y + tab_bar_height as i32,
                     fd.rect.width,
-                    if has_tabs { fd.rect.height.saturating_sub(tab_bar_height) } else { fd.rect.height },
+                    fd.rect.height.saturating_sub(tab_bar_height),
                 )
             };
 
