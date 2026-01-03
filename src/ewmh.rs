@@ -49,6 +49,11 @@ pub struct Atoms {
     pub net_wm_window_type_dropdown_menu: Atom,
     pub net_wm_window_type_tooltip: Atom,
     pub net_wm_window_type_notification: Atom,
+    pub net_wm_window_type_dock: Atom,
+
+    // Strut atoms (for dock/panel space reservation)
+    pub net_wm_strut: Atom,
+    pub net_wm_strut_partial: Atom,
 }
 
 impl Atoms {
@@ -81,6 +86,9 @@ impl Atoms {
             net_wm_window_type_dropdown_menu: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?,
             net_wm_window_type_tooltip: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_TOOLTIP")?,
             net_wm_window_type_notification: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")?,
+            net_wm_window_type_dock: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_DOCK")?,
+            net_wm_strut: Self::intern(conn, b"_NET_WM_STRUT")?,
+            net_wm_strut_partial: Self::intern(conn, b"_NET_WM_STRUT_PARTIAL")?,
         })
     }
 

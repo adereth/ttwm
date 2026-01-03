@@ -50,6 +50,24 @@ impl From<Rect> for RectSnapshot {
     }
 }
 
+/// EWMH strut partial - space reserved at screen edges by docks/panels
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StrutPartial {
+    pub left: u32,
+    pub right: u32,
+    pub top: u32,
+    pub bottom: u32,
+    // Extended fields for multi-monitor (start/end coords)
+    pub left_start_y: u32,
+    pub left_end_y: u32,
+    pub right_start_y: u32,
+    pub right_end_y: u32,
+    pub top_start_x: u32,
+    pub top_end_x: u32,
+    pub bottom_start_x: u32,
+    pub bottom_end_x: u32,
+}
+
 /// Snapshot of the layout tree for IPC serialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutSnapshot {

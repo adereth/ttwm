@@ -34,6 +34,7 @@ use workspaces::{WorkspaceManager, NUM_WORKSPACES};
 use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color, darken_color};
 use state::{StateTransition, UnmanageReason};
 use tracing::EventTracer;
+use types::StrutPartial;
 
 /// Layout configuration
 struct LayoutConfig {
@@ -210,6 +211,8 @@ struct Wm {
     urgent_windows: Vec<Window>,
     /// Overlay window for cross-workspace urgent indicator
     urgent_indicator: Option<Window>,
+    /// Dock windows (polybar, etc.) and their strut reservations
+    dock_windows: HashMap<Window, StrutPartial>,
 }
 
 impl Wm {
@@ -368,6 +371,7 @@ impl Wm {
             suppress_enter_focus: false,
             urgent_windows: Vec::new(),
             urgent_indicator: None,
+            dock_windows: HashMap::new(),
         })
     }
 
@@ -738,26 +742,34 @@ impl Wm {
         self.usable_area(self.monitors.focused_id())
     }
 
-    /// Get the usable area for a specific monitor (with outer gaps)
+    /// Get the usable area for a specific monitor (with outer gaps and struts)
     fn usable_area(&self, monitor_id: MonitorId) -> Rect {
         let gap = self.config.outer_gap;
-        if let Some(monitor) = self.monitors.get(monitor_id) {
-            Rect::new(
-                monitor.geometry.x + gap as i32,
-                monitor.geometry.y + gap as i32,
-                monitor.geometry.width.saturating_sub(gap * 2),
-                monitor.geometry.height.saturating_sub(gap * 2),
-            )
+        let base = if let Some(monitor) = self.monitors.get(monitor_id) {
+            monitor.geometry
         } else {
             // Fallback to full screen if monitor not found
             let screen = self.screen();
-            Rect::new(
-                gap as i32,
-                gap as i32,
-                (screen.width_in_pixels as u32).saturating_sub(gap * 2),
-                (screen.height_in_pixels as u32).saturating_sub(gap * 2),
-            )
-        }
+            Rect::new(0, 0, screen.width_in_pixels as u32, screen.height_in_pixels as u32)
+        };
+
+        // Aggregate struts from all dock windows (take max of each edge)
+        let (strut_left, strut_right, strut_top, strut_bottom) =
+            self.dock_windows.values().fold((0u32, 0u32, 0u32, 0u32), |acc, s| {
+                (
+                    acc.0.max(s.left),
+                    acc.1.max(s.right),
+                    acc.2.max(s.top),
+                    acc.3.max(s.bottom),
+                )
+            });
+
+        Rect::new(
+            base.x + gap as i32 + strut_left as i32,
+            base.y + gap as i32 + strut_top as i32,
+            base.width.saturating_sub(gap * 2 + strut_left + strut_right),
+            base.height.saturating_sub(gap * 2 + strut_top + strut_bottom),
+        )
     }
 
     /// Get or create a tab bar window for a frame
@@ -2082,6 +2094,91 @@ impl Wm {
         false
     }
 
+    /// Check if a window is a dock (status bar like polybar)
+    fn is_dock_window(&self, window: Window) -> bool {
+        let reply = match self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_window_type,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        ) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => reply,
+                Err(_) => return false,
+            },
+            Err(_) => return false,
+        };
+
+        if let Some(types) = reply.value32() {
+            for window_type in types {
+                if window_type == self.atoms.net_wm_window_type_dock {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Read strut partial from a window (returns Default if none set)
+    fn read_struts(&self, window: Window) -> StrutPartial {
+        // Try _NET_WM_STRUT_PARTIAL first (12 values)
+        if let Ok(cookie) = self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_strut_partial,
+            AtomEnum::CARDINAL,
+            0,
+            12,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                let values: Vec<u32> = reply.value32().map(|v| v.collect()).unwrap_or_default();
+                if values.len() >= 12 {
+                    return StrutPartial {
+                        left: values[0],
+                        right: values[1],
+                        top: values[2],
+                        bottom: values[3],
+                        left_start_y: values[4],
+                        left_end_y: values[5],
+                        right_start_y: values[6],
+                        right_end_y: values[7],
+                        top_start_x: values[8],
+                        top_end_x: values[9],
+                        bottom_start_x: values[10],
+                        bottom_end_x: values[11],
+                    };
+                }
+            }
+        }
+
+        // Fallback to _NET_WM_STRUT (4 values)
+        if let Ok(cookie) = self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_strut,
+            AtomEnum::CARDINAL,
+            0,
+            4,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                let values: Vec<u32> = reply.value32().map(|v| v.collect()).unwrap_or_default();
+                if values.len() >= 4 {
+                    return StrutPartial {
+                        left: values[0],
+                        right: values[1],
+                        top: values[2],
+                        bottom: values[3],
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+
+        StrutPartial::default()
+    }
+
     /// Check if a window is currently floating
     fn is_floating(&self, window: Window) -> bool {
         self.workspaces().current().is_floating(window)
@@ -2279,6 +2376,23 @@ impl Wm {
         // Map the window (make it visible)
         self.conn.map_window(window)?;
 
+        // Check if window is a dock (status bar like polybar)
+        if self.is_dock_window(window) {
+            let struts = self.read_struts(window);
+            log::info!(
+                "Managing dock 0x{:x}: top={}, bottom={}, left={}, right={}",
+                window, struts.top, struts.bottom, struts.left, struts.right
+            );
+            self.dock_windows.insert(window, struts);
+            // Keep dock windows above others
+            self.conn.configure_window(
+                window,
+                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )?;
+            self.apply_layout()?;
+            return Ok(());
+        }
+
         // Check if window should float (based on _NET_WM_WINDOW_TYPE)
         if self.should_float(window) {
             // Get window geometry for floating placement
@@ -2362,6 +2476,13 @@ impl Wm {
         if self.urgent_windows.contains(&window) {
             self.urgent_windows.retain(|&w| w != window);
             self.update_urgent_indicator()?;
+        }
+
+        // Remove from dock windows if present
+        if self.dock_windows.remove(&window).is_some() {
+            log::info!("Unmanaging dock window 0x{:x}", window);
+            self.apply_layout()?;
+            return Ok(());
         }
 
         // Find which workspace contains this window (search ALL workspaces)
