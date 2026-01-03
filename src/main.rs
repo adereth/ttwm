@@ -177,6 +177,8 @@ struct Wm {
     config: LayoutConfig,
     /// Tab bar windows for each frame ((monitor_id, workspace_idx, NodeId) -> Window)
     tab_bar_windows: HashMap<(MonitorId, usize, NodeId), Window>,
+    /// Pixmap buffers for double-buffered tab bar rendering (tab_bar_window -> pixmap)
+    tab_bar_pixmaps: HashMap<Window, u32>,
     /// Empty frame placeholder windows ((monitor_id, workspace_idx, NodeId) -> Window)
     empty_frame_windows: HashMap<(MonitorId, usize, NodeId), Window>,
     /// Windows we've intentionally unmapped (hidden tabs) - don't unmanage on UnmapNotify
@@ -354,6 +356,7 @@ impl Wm {
             check_window,
             config,
             tab_bar_windows: HashMap::new(),
+            tab_bar_pixmaps: HashMap::new(),
             empty_frame_windows: HashMap::new(),
             hidden_windows: std::collections::HashSet::new(),
             gc,
@@ -797,6 +800,10 @@ impl Wm {
                     .width(width)
                     .height(height),
             )?;
+            // Invalidate pixmap buffer (size may have changed)
+            if let Some(pixmap) = self.tab_bar_pixmaps.remove(&window) {
+                let _ = self.conn.free_pixmap(pixmap);
+            }
             return Ok(window);
         }
 
@@ -822,6 +829,20 @@ impl Wm {
         self.tab_bar_windows.insert(key, window);
 
         Ok(window)
+    }
+
+    /// Get or create a pixmap buffer for double-buffered tab bar rendering
+    fn get_or_create_tab_bar_pixmap(&mut self, window: Window, width: u16, height: u16) -> Result<u32> {
+        // Check if we have an existing pixmap
+        if let Some(&pixmap) = self.tab_bar_pixmaps.get(&window) {
+            return Ok(pixmap);
+        }
+
+        // Create new pixmap
+        let pixmap = self.conn.generate_id()?;
+        self.conn.create_pixmap(self.screen_depth, pixmap, window, width, height)?;
+        self.tab_bar_pixmaps.insert(window, pixmap);
+        Ok(pixmap)
     }
 
     /// Get or create a placeholder window for an empty frame (shows border)
@@ -1493,6 +1514,16 @@ impl Wm {
 
     /// Draw the tab bar for a frame (Chrome-style with content-based tab widths)
     fn draw_tab_bar(&mut self, frame_id: NodeId, window: Window, rect: &Rect, vertical: bool) -> Result<()> {
+        // Calculate pixmap dimensions based on orientation
+        let (pix_width, pix_height) = if vertical {
+            (self.config.vertical_tab_width as u16, rect.height as u16)
+        } else {
+            (rect.width as u16, self.config.tab_bar_height as u16)
+        };
+
+        // Get or create pixmap buffer for double-buffered rendering
+        let pixmap = self.get_or_create_tab_bar_pixmap(window, pix_width, pix_height)?;
+
         // Extract all needed data from frame before any mutable calls
         let (windows, focused_tab, is_empty) = {
             let frame = match self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
@@ -1502,15 +1533,16 @@ impl Wm {
             (frame.windows.clone(), frame.focused, frame.windows.is_empty())
         };
 
-        // Draw background
+        // Draw background to pixmap
         if vertical {
-            self.draw_vertical_tab_bar_background(window, rect)?;
+            self.draw_vertical_tab_bar_background(pixmap, rect)?;
         } else {
-            self.draw_tab_bar_background(window, rect)?;
+            self.draw_tab_bar_background(pixmap, rect)?;
         }
 
-        // Empty frame - nothing to draw in tab bar (border is on the placeholder window)
+        // Empty frame - copy pixmap and return
         if is_empty {
+            self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
             return Ok(());
         }
 
@@ -1518,7 +1550,7 @@ impl Wm {
         let is_focused_frame = frame_id == self.workspaces().current().layout.focused;
 
         if vertical {
-            // Draw vertical tabs (icon-only)
+            // Draw vertical tabs (icon-only) to pixmap
             let tab_size = self.config.vertical_tab_width;
             let num_tabs = windows.len();
 
@@ -1529,7 +1561,7 @@ impl Wm {
                 let is_tagged = self.tagged_windows.contains(&client_window);
 
                 self.draw_single_vertical_tab(
-                    window,
+                    pixmap,
                     y,
                     tab_size,
                     client_window,
@@ -1540,7 +1572,7 @@ impl Wm {
                 )?;
             }
         } else {
-            // Draw horizontal tabs (with text)
+            // Draw horizontal tabs (with text) to pixmap
             let tab_layout = self.calculate_tab_layout(frame_id);
             let show_icons = self.config.show_tab_icons;
             let num_tabs = windows.len();
@@ -1552,7 +1584,7 @@ impl Wm {
                 let is_tagged = self.tagged_windows.contains(&client_window);
 
                 self.draw_single_tab(
-                    window,
+                    pixmap,
                     x,
                     tab_width,
                     client_window,
@@ -1564,6 +1596,9 @@ impl Wm {
                 )?;
             }
         }
+
+        // Copy pixmap to window in one operation (double buffering)
+        self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
 
         Ok(())
     }
@@ -1763,6 +1798,10 @@ impl Wm {
 
         for key in to_remove {
             if let Some(window) = self.tab_bar_windows.remove(&key) {
+                // Free associated pixmap buffer
+                if let Some(pixmap) = self.tab_bar_pixmaps.remove(&window) {
+                    let _ = self.conn.free_pixmap(pixmap);
+                }
                 if let Err(e) = self.conn.destroy_window(window) {
                     log::error!("Failed to destroy tab bar window: {}", e);
                 }
@@ -3444,8 +3483,11 @@ impl Wm {
         if event.detail == 2 {
             if let Some(frame) = self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
                 if frame.is_empty() {
-                    // Remove tab bar window
+                    // Remove tab bar window and its pixmap buffer
                     if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
+                        if let Some(pixmap) = self.tab_bar_pixmaps.remove(&tab_window) {
+                            let _ = self.conn.free_pixmap(pixmap);
+                        }
                         self.conn.destroy_window(tab_window)?;
                     }
                     // Remove this specific empty frame from layout
@@ -3558,6 +3600,9 @@ impl Wm {
                     self.conn.destroy_window(empty_window)?;
                 }
                 if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
+                    if let Some(pixmap) = self.tab_bar_pixmaps.remove(&tab_window) {
+                        let _ = self.conn.free_pixmap(pixmap);
+                    }
                     self.conn.destroy_window(tab_window)?;
                 }
                 self.workspaces_mut().current_mut().layout.remove_frame_by_id(frame_id);
