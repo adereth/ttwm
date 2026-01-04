@@ -1898,10 +1898,9 @@ impl Wm {
                 non_empty_frames.push(fd.frame_id);
             }
 
-            // Only show the focused window, unmap others
+            // Map focused window FIRST to reduce flicker (show new before hiding old)
             for (i, &window) in fd.windows.iter().enumerate() {
                 if i == fd.focused_idx {
-                    // Configure and map the focused window
                     self.conn.configure_window(
                         window,
                         &ConfigureWindowAux::new()
@@ -1911,18 +1910,19 @@ impl Wm {
                             .height(client_height.saturating_sub(border * 2))
                             .border_width(border),
                     )?;
-                    // Set focused border color before mapping to avoid flicker
                     self.conn.change_window_attributes(
                         window,
                         &ChangeWindowAttributesAux::new()
                             .border_pixel(self.config.border_focused),
                     )?;
                     self.conn.map_window(window)?;
-                    // Remove from hidden set since it's now visible
                     self.hidden_windows.remove(&window);
-                } else {
-                    // Unmap non-focused windows (tabs)
-                    // Track that we intentionally hid this window
+                }
+            }
+
+            // Then unmap non-focused windows (hidden tabs)
+            for (i, &window) in fd.windows.iter().enumerate() {
+                if i != fd.focused_idx {
                     self.hidden_windows.insert(window);
                     self.conn.unmap_window(window)?;
                 }
