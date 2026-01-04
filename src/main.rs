@@ -209,6 +209,8 @@ struct Wm {
     tagged_windows: std::collections::HashSet<Window>,
     /// Suppress EnterNotify focus changes (set after explicit focus operations)
     suppress_enter_focus: bool,
+    /// Skip tab bar redraw in focus_window() when apply_layout() just did it
+    skip_focus_tab_bar_redraw: bool,
     /// Windows that are urgent (FIFO order - oldest first)
     urgent_windows: Vec<Window>,
     /// Overlay window for cross-workspace urgent indicator
@@ -372,6 +374,7 @@ impl Wm {
             icon_cache: HashMap::new(),
             tagged_windows: std::collections::HashSet::new(),
             suppress_enter_focus: false,
+            skip_focus_tab_bar_redraw: false,
             urgent_windows: Vec::new(),
             urgent_indicator: None,
             dock_windows: HashMap::new(),
@@ -1908,6 +1911,12 @@ impl Wm {
                             .height(client_height.saturating_sub(border * 2))
                             .border_width(border),
                     )?;
+                    // Set focused border color before mapping to avoid flicker
+                    self.conn.change_window_attributes(
+                        window,
+                        &ChangeWindowAttributesAux::new()
+                            .border_pixel(self.config.border_focused),
+                    )?;
                     self.conn.map_window(window)?;
                     // Remove from hidden set since it's now visible
                     self.hidden_windows.remove(&window);
@@ -2951,14 +2960,16 @@ impl Wm {
                 }
             }
 
-            // Always redraw current frame's tab bar (new tabs, focus changes, etc.)
-            if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
-                if let Some(rect) = geometry_map.get(&frame_id) {
-                    let vertical = self.workspaces().current().layout.get(frame_id)
-                        .and_then(|n| n.as_frame())
-                        .map(|f| f.vertical_tabs)
-                        .unwrap_or(false);
-                    self.draw_tab_bar(frame_id, tab_window, rect, vertical)?;
+            // Redraw current frame's tab bar (unless apply_layout() just did it)
+            if !self.skip_focus_tab_bar_redraw {
+                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
+                    if let Some(rect) = geometry_map.get(&frame_id) {
+                        let vertical = self.workspaces().current().layout.get(frame_id)
+                            .and_then(|n| n.as_frame())
+                            .map(|f| f.vertical_tabs)
+                            .unwrap_or(false);
+                        self.draw_tab_bar(frame_id, tab_window, rect, vertical)?;
+                    }
                 }
             }
         }
@@ -3542,7 +3553,10 @@ impl Wm {
                 // Focus this tab immediately
                 if let Some(w) = self.workspaces_mut().current_mut().layout.focus_tab(clicked_tab) {
                     self.apply_layout()?;
+                    // Skip redundant tab bar redraw - apply_layout() just did it
+                    self.skip_focus_tab_bar_redraw = true;
                     self.focus_window(w)?;
+                    self.skip_focus_tab_bar_redraw = false;
                 }
 
                 // Start drag operation - grab pointer to track motion
