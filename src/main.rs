@@ -201,6 +201,18 @@ struct Wm {
     cursor_resize_h: Cursor,
     /// Vertical resize cursor
     cursor_resize_v: Cursor,
+    /// Default arrow cursor
+    cursor_default: Cursor,
+    /// Top-left corner resize cursor
+    cursor_resize_tl: Cursor,
+    /// Top-right corner resize cursor
+    cursor_resize_tr: Cursor,
+    /// Bottom-left corner resize cursor
+    cursor_resize_bl: Cursor,
+    /// Bottom-right corner resize cursor
+    cursor_resize_br: Cursor,
+    /// Currently displayed cursor (to avoid redundant changes)
+    current_cursor: Cursor,
     /// Screen depth (for put_image)
     screen_depth: u8,
     /// Icon cache for tab icons (window -> cached icon, None = no icon available)
@@ -331,6 +343,66 @@ impl Wm {
             0xFFFF, 0xFFFF, 0xFFFF,  // background RGB (white)
         )?;
 
+        // XC_left_ptr = 68 (default arrow)
+        let cursor_default = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_default,
+            cursor_font,
+            cursor_font,
+            68,
+            68 + 1,
+            0, 0, 0,
+            0xFFFF, 0xFFFF, 0xFFFF,
+        )?;
+
+        // XC_top_left_corner = 134
+        let cursor_resize_tl = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_resize_tl,
+            cursor_font,
+            cursor_font,
+            134,
+            134 + 1,
+            0, 0, 0,
+            0xFFFF, 0xFFFF, 0xFFFF,
+        )?;
+
+        // XC_top_right_corner = 136
+        let cursor_resize_tr = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_resize_tr,
+            cursor_font,
+            cursor_font,
+            136,
+            136 + 1,
+            0, 0, 0,
+            0xFFFF, 0xFFFF, 0xFFFF,
+        )?;
+
+        // XC_bottom_left_corner = 12
+        let cursor_resize_bl = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_resize_bl,
+            cursor_font,
+            cursor_font,
+            12,
+            12 + 1,
+            0, 0, 0,
+            0xFFFF, 0xFFFF, 0xFFFF,
+        )?;
+
+        // XC_bottom_right_corner = 14
+        let cursor_resize_br = conn.generate_id()?;
+        conn.create_glyph_cursor(
+            cursor_resize_br,
+            cursor_font,
+            cursor_font,
+            14,
+            14 + 1,
+            0, 0, 0,
+            0xFFFF, 0xFFFF, 0xFFFF,
+        )?;
+
         conn.close_font(cursor_font)?;
 
         // Initialize monitor manager with RandR
@@ -370,6 +442,12 @@ impl Wm {
             font_renderer,
             cursor_resize_h,
             cursor_resize_v,
+            cursor_default,
+            cursor_resize_tl,
+            cursor_resize_tr,
+            cursor_resize_bl,
+            cursor_resize_br,
+            current_cursor: cursor_default,
             screen_depth,
             icon_cache: HashMap::new(),
             tagged_windows: std::collections::HashSet::new(),
@@ -396,6 +474,47 @@ impl Wm {
         &mut self.monitors.focused_mut().workspaces
     }
 
+    /// Get the appropriate cursor for a resize edge
+    fn cursor_for_edge(&self, edge: ResizeEdge) -> Cursor {
+        match edge {
+            ResizeEdge::Left | ResizeEdge::Right => self.cursor_resize_h,
+            ResizeEdge::Top | ResizeEdge::Bottom => self.cursor_resize_v,
+            ResizeEdge::TopLeft => self.cursor_resize_tl,
+            ResizeEdge::TopRight => self.cursor_resize_tr,
+            ResizeEdge::BottomLeft => self.cursor_resize_bl,
+            ResizeEdge::BottomRight => self.cursor_resize_br,
+        }
+    }
+
+    /// Update cursor based on what's under the mouse (for hover feedback)
+    fn update_hover_cursor(&mut self, x: i32, y: i32) -> Result<()> {
+        let screen = self.usable_screen();
+        let gap = self.config.gap;
+
+        // Check if over a split gap
+        let new_cursor = if let Some((_, direction, _, _)) =
+            self.workspaces().current().layout.find_split_at_gap(screen, gap, x, y)
+        {
+            match direction {
+                SplitDirection::Horizontal => self.cursor_resize_h,
+                SplitDirection::Vertical => self.cursor_resize_v,
+            }
+        } else {
+            self.cursor_default
+        };
+
+        // Only update if cursor changed
+        if new_cursor != self.current_cursor {
+            self.conn.change_window_attributes(
+                self.root,
+                &ChangeWindowAttributesAux::new().cursor(new_cursor),
+            )?;
+            self.current_cursor = new_cursor;
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
     /// Become the window manager by requesting SubstructureRedirect on root
     fn become_wm(&self) -> Result<()> {
         // Set event mask on root window
@@ -404,7 +523,8 @@ impl Wm {
             | EventMask::SUBSTRUCTURE_NOTIFY
             | EventMask::ENTER_WINDOW  // For focus-follows-mouse
             | EventMask::STRUCTURE_NOTIFY
-            | EventMask::BUTTON_PRESS; // For gap resize detection
+            | EventMask::BUTTON_PRESS  // For gap resize detection
+            | EventMask::POINTER_MOTION; // For hover cursor feedback
 
         let result = self.conn.change_window_attributes(
             self.root,
@@ -3217,6 +3337,11 @@ impl Wm {
                     }
                 }
                 self.suppress_enter_focus = false;
+
+                // Update hover cursor when entering root window (gap area) or leaving a window
+                if self.drag_state.is_none() {
+                    self.update_hover_cursor(e.root_x as i32, e.root_y as i32)?;
+                }
             }
 
             Event::KeyPress(e) => {
@@ -3359,6 +3484,10 @@ impl Wm {
                     self.conn.flush()?;
                 }
                 // Tab drags don't need motion processing - drop target determined at release
+                else if self.drag_state.is_none() {
+                    // No drag in progress - update cursor based on hover position
+                    self.update_hover_cursor(e.root_x as i32, e.root_y as i32)?;
+                }
             }
 
             Event::ClientMessage(e) => {
@@ -3701,7 +3830,7 @@ impl Wm {
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
                 x11rb::NONE,
-                x11rb::NONE, // TODO: Use appropriate resize cursor
+                self.cursor_for_edge(resize_edge),
                 x11rb::CURRENT_TIME,
             )?;
 
