@@ -37,7 +37,7 @@ sudo pacman -S base-devel libx11 libxcb freetype2
 ## Building
 
 ```bash
-git clone https://github.com/yourusername/ttwm.git
+git clone https://github.com/adereth/ttwm.git
 cd ttwm
 cargo build --release
 ```

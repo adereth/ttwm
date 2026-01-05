@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "A tabbed tiling window manager for X11, inspired by Notion"
 license = "MIT"
-authors = ["Your Name <your.email@example.com>"]
-repository = "https://github.com/yourusername/ttwm"
+authors = ["Matt Adereth <adereth@gmail.com>"]
+repository = "https://github.com/adereth/ttwm"
 
 [dependencies]
 # X11 bindings - pure Rust implementation
