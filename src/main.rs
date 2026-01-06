@@ -956,12 +956,13 @@ impl Wm {
 
     /// Get or create a pixmap buffer for double-buffered tab bar rendering
     fn get_or_create_tab_bar_pixmap(&mut self, window: Window, width: u16, height: u16) -> Result<u32> {
-        // Check if we have an existing pixmap
-        if let Some(&pixmap) = self.tab_bar_pixmaps.get(&window) {
-            return Ok(pixmap);
+        // Always free existing pixmap to ensure correct dimensions
+        // (pixmap might have been created with different dimensions)
+        if let Some(old_pixmap) = self.tab_bar_pixmaps.remove(&window) {
+            let _ = self.conn.free_pixmap(old_pixmap);
         }
 
-        // Create new pixmap
+        // Create new pixmap with requested dimensions
         let pixmap = self.conn.generate_id()?;
         self.conn.create_pixmap(self.screen_depth, pixmap, window, width, height)?;
         self.tab_bar_pixmaps.insert(window, pixmap);
@@ -1262,19 +1263,17 @@ impl Wm {
     }
 
     /// Draw the pseudo-transparent background for a tab bar.
-    fn draw_tab_bar_background(&mut self, window: Window, rect: &Rect) -> Result<()> {
-        let height = self.config.tab_bar_height;
-
+    fn draw_tab_bar_background(&mut self, pixmap: u32, rect: &Rect, pix_width: u16, pix_height: u16) -> Result<()> {
         // Clear with solid color first to ensure old content is erased
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
         self.conn.poly_fill_rectangle(
-            window,
+            pixmap,
             self.gc,
             &[Rectangle {
                 x: 0,
                 y: 0,
-                width: rect.width as u16,
-                height: height as u16,
+                width: pix_width,
+                height: pix_height,
             }],
         )?;
 
@@ -1282,15 +1281,15 @@ impl Wm {
         if let Some(pixels) = self.sample_root_background(
             rect.x as i16,
             rect.y as i16,
-            rect.width as u16,
-            height as u16,
+            pix_width,
+            pix_height,
         ) {
             self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
-                window,
+                pixmap,
                 self.gc,
-                rect.width as u16,
-                height as u16,
+                pix_width,
+                pix_height,
                 0, 0,  // destination x, y
                 0,     // left_pad
                 self.screen_depth,
@@ -1302,19 +1301,17 @@ impl Wm {
     }
 
     /// Draw the background for a vertical tab bar.
-    fn draw_vertical_tab_bar_background(&mut self, window: Window, rect: &Rect) -> Result<()> {
-        let width = self.config.vertical_tab_width;
-
+    fn draw_vertical_tab_bar_background(&mut self, pixmap: u32, rect: &Rect, pix_width: u16, pix_height: u16) -> Result<()> {
         // Clear with solid color first
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
         self.conn.poly_fill_rectangle(
-            window,
+            pixmap,
             self.gc,
             &[Rectangle {
                 x: 0,
                 y: 0,
-                width: width as u16,
-                height: rect.height as u16,
+                width: pix_width,
+                height: pix_height,
             }],
         )?;
 
@@ -1322,15 +1319,15 @@ impl Wm {
         if let Some(pixels) = self.sample_root_background(
             rect.x as i16,
             rect.y as i16,
-            width as u16,
-            rect.height as u16,
+            pix_width,
+            pix_height,
         ) {
             self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
-                window,
+                pixmap,
                 self.gc,
-                width as u16,
-                rect.height as u16,
+                pix_width,
+                pix_height,
                 0, 0,
                 0,
                 self.screen_depth,
@@ -1645,6 +1642,7 @@ impl Wm {
         };
 
         // Get or create pixmap buffer for double-buffered rendering
+        // (pixmap is always recreated fresh, and background fill covers entire area)
         let pixmap = self.get_or_create_tab_bar_pixmap(window, pix_width, pix_height)?;
 
         // Extract all needed data from frame before any mutable calls
@@ -1658,12 +1656,12 @@ impl Wm {
 
         // Draw background to pixmap
         if vertical {
-            self.draw_vertical_tab_bar_background(pixmap, rect)?;
+            self.draw_vertical_tab_bar_background(pixmap, rect, pix_width, pix_height)?;
         } else {
-            self.draw_tab_bar_background(pixmap, rect)?;
+            self.draw_tab_bar_background(pixmap, rect, pix_width, pix_height)?;
         }
 
-        // Empty frame - copy pixmap and return
+        // Empty frame - just copy the background pixmap
         if is_empty {
             self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
             return Ok(());
@@ -1694,6 +1692,24 @@ impl Wm {
                     is_focused_frame,
                 )?;
             }
+
+            // Clear area after last tab on the WINDOW to remove ghost tabs
+            let clear_start = (num_tabs as u32 * tab_size) as i16;
+            if (clear_start as u16) < pix_height {
+                self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
+                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+                self.conn.poly_fill_rectangle(
+                    window,
+                    self.gc,
+                    &[Rectangle {
+                        x: 0,
+                        y: clear_start,
+                        width: pix_width,
+                        height: pix_height - clear_start as u16,
+                    }],
+                )?;
+                return Ok(());
+            }
         } else {
             // Draw horizontal tabs (with text) to pixmap
             let tab_layout = self.calculate_tab_layout(frame_id);
@@ -1718,9 +1734,31 @@ impl Wm {
                     show_icons,
                 )?;
             }
+
+            // Save tab_layout info for clearing ghost tabs after copy
+            if let Some(&(last_x, last_width)) = tab_layout.last() {
+                let clear_start = last_x + last_width as i16;
+                if (clear_start as u16) < pix_width {
+                    // Copy pixmap to window first
+                    self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
+                    // Then clear the empty area on the WINDOW to remove ghost tabs
+                    self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+                    self.conn.poly_fill_rectangle(
+                        window,
+                        self.gc,
+                        &[Rectangle {
+                            x: clear_start,
+                            y: 0,
+                            width: pix_width - clear_start as u16,
+                            height: pix_height,
+                        }],
+                    )?;
+                    return Ok(());
+                }
+            }
         }
 
-        // Copy pixmap to window in one operation (double buffering)
+        // Copy the rendered pixmap to window (double buffering)
         self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
 
         Ok(())
