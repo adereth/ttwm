@@ -3400,6 +3400,7 @@ impl Wm {
             }
 
             Event::PropertyNotify(e) => {
+                self.tracer.trace_x11_event("PropertyNotify", Some(e.window), &format!("atom={}", e.atom));
                 // Invalidate icon cache if _NET_WM_ICON changed
                 if e.atom == self.atoms.net_wm_icon {
                     self.icon_cache.remove(&e.window);
