@@ -215,8 +215,8 @@ struct Wm {
     current_cursor: Cursor,
     /// Screen depth (for put_image)
     screen_depth: u8,
-    /// Icon cache for tab icons (window -> cached icon, None = no icon available)
-    icon_cache: HashMap<Window, Option<CachedIcon>>,
+    /// Icon cache for tab icons (only caches windows that have icons)
+    icon_cache: HashMap<Window, CachedIcon>,
     /// Windows that are currently tagged for batch operations
     tagged_windows: std::collections::HashSet<Window>,
     /// Suppress EnterNotify focus changes (set after explicit focus operations)
@@ -1812,13 +1812,16 @@ impl Wm {
 
         // Check cache first
         if self.icon_cache.contains_key(&window) {
-            return self.icon_cache.get(&window).and_then(|o| o.as_ref());
+            return self.icon_cache.get(&window);
         }
 
-        // Try to fetch _NET_WM_ICON
-        let icon = self.fetch_and_process_icon(window, ICON_SIZE);
-        self.icon_cache.insert(window, icon);
-        self.icon_cache.get(&window).and_then(|o| o.as_ref())
+        // Try to fetch _NET_WM_ICON - only cache if we get an actual icon
+        if let Some(icon) = self.fetch_and_process_icon(window, ICON_SIZE) {
+            self.icon_cache.insert(window, icon);
+            self.icon_cache.get(&window)
+        } else {
+            None // Don't cache missing icons - will retry on next redraw
+        }
     }
 
     /// Fetch _NET_WM_ICON and process it into a 20x20 BGRA image
