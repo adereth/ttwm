@@ -2678,6 +2678,9 @@ impl Wm {
         // Remove from tagged set if present
         self.tagged_windows.remove(&window);
 
+        // Remove from icon cache to prevent stale icons when X11 reuses window IDs
+        self.icon_cache.remove(&window);
+
         // Remove from urgent list if present
         if self.urgent_windows.contains(&window) {
             self.urgent_windows.retain(|&w| w != window);
