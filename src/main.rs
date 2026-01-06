@@ -474,6 +474,19 @@ impl Wm {
         &mut self.monitors.focused_mut().workspaces
     }
 
+    /// Find a frame by name across all workspaces/monitors
+    /// Returns (MonitorId, workspace_index, NodeId) if found
+    fn find_frame_by_name_global(&self, name: &str) -> Option<(MonitorId, usize, NodeId)> {
+        for (monitor_id, monitor) in self.monitors.iter() {
+            for (ws_idx, ws) in monitor.workspaces.workspaces.iter().enumerate() {
+                if let Some(node_id) = ws.layout.find_frame_by_name(name) {
+                    return Some((monitor_id, ws_idx, node_id));
+                }
+            }
+        }
+        None
+    }
+
     /// Get the appropriate cursor for a resize edge
     fn cursor_for_edge(&self, edge: ResizeEdge) -> Cursor {
         match edge {
@@ -4768,6 +4781,59 @@ impl Wm {
                                 message: format!("Monitor '{}' not found", name),
                             }
                         }
+                    }
+                }
+            }
+            IpcCommand::SetFrameName { name } => {
+                let focused_frame = self.workspaces().current().layout.focused;
+
+                // If setting a name (not clearing), check for uniqueness
+                if let Some(ref n) = name {
+                    if !n.is_empty() {
+                        // Check if name is taken by another frame
+                        if let Some((_, _, existing_id)) = self.find_frame_by_name_global(n) {
+                            if existing_id != focused_frame {
+                                return IpcResponse::Error {
+                                    code: "name_taken".to_string(),
+                                    message: format!("Frame name '{}' is already in use", n),
+                                };
+                            }
+                        }
+                    }
+                }
+
+                // Set the name
+                if self.workspaces_mut().current_mut().layout.set_frame_name(focused_frame, name) {
+                    IpcResponse::Ok
+                } else {
+                    IpcResponse::Error {
+                        code: "set_frame_name_failed".to_string(),
+                        message: "Failed to set frame name".to_string(),
+                    }
+                }
+            }
+            IpcCommand::GetFrameByName { name } => {
+                if let Some((monitor_id, ws_idx, node_id)) = self.find_frame_by_name_global(&name) {
+                    let monitor = self.monitors.get(monitor_id).unwrap();
+                    let ws = &monitor.workspaces.workspaces[ws_idx];
+                    let window_count = if let Some(frame) = ws.layout.get(node_id).and_then(|n| n.as_frame()) {
+                        frame.windows.len()
+                    } else {
+                        0
+                    };
+                    let frame_name = ws.layout.get_frame_name(node_id).map(|s| s.to_string());
+
+                    IpcResponse::Frame {
+                        id: format!("{:?}", node_id),
+                        name: frame_name,
+                        monitor: monitor.name.clone(),
+                        workspace: ws_idx + 1, // 1-indexed for user display
+                        window_count,
+                    }
+                } else {
+                    IpcResponse::Error {
+                        code: "frame_not_found".to_string(),
+                        message: format!("No frame found with name '{}'", name),
                     }
                 }
             }

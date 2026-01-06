@@ -80,6 +80,8 @@ pub struct LayoutSnapshot {
 pub enum NodeSnapshot {
     Frame {
         id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         windows: Vec<u32>,
         focused_tab: usize,
         #[serde(skip_serializing_if = "Option::is_none")]

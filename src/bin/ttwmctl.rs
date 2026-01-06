@@ -204,6 +204,21 @@ enum Commands {
         target: String,
     },
 
+    /// Set or clear the name of the focused frame
+    NameFrame {
+        /// Name to assign (omit or use --clear to remove name)
+        name: Option<String>,
+        /// Clear the frame name
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// Find a frame by name
+    FindFrame {
+        /// Frame name to search for
+        name: String,
+    },
+
     /// Capture a screenshot
     Screenshot {
         /// Path to save the screenshot
@@ -317,6 +332,26 @@ fn main() {
         Commands::CurrentMonitor => serde_json::json!({"command": "get_current_monitor"}),
         Commands::FocusMonitor { target } => {
             serde_json::json!({"command": "focus_monitor", "target": target})
+        }
+        Commands::NameFrame { name, clear } => {
+            // If --clear is specified, clear the name
+            // If a name is provided, set it
+            // If neither, show an error
+            if *clear {
+                serde_json::json!({"command": "set_frame_name", "name": null})
+            } else if let Some(n) = name {
+                if n.is_empty() {
+                    serde_json::json!({"command": "set_frame_name", "name": null})
+                } else {
+                    serde_json::json!({"command": "set_frame_name", "name": n})
+                }
+            } else {
+                eprintln!("Specify a name or use --clear to remove the frame name");
+                std::process::exit(1);
+            }
+        }
+        Commands::FindFrame { name } => {
+            serde_json::json!({"command": "get_frame_by_name", "name": name})
         }
         Commands::Screenshot { path } => {
             serde_json::json!({"command": "screenshot", "path": path.to_string_lossy()})

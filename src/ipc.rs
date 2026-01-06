@@ -114,6 +114,12 @@ pub enum IpcCommand {
     /// Focus a specific monitor by name or direction (left/right)
     FocusMonitor { target: String },
 
+    // Frame naming
+    /// Set the name of the focused frame (None or empty string to clear)
+    SetFrameName { name: Option<String> },
+    /// Find a frame by name (searches all workspaces/monitors)
+    GetFrameByName { name: String },
+
     // Debug
     /// Capture screenshot to file
     Screenshot { path: String },
@@ -160,6 +166,14 @@ pub enum IpcResponse {
     Monitors { data: Vec<MonitorInfo> },
     /// Current monitor info
     Monitor { name: String, is_primary: bool },
+    /// Frame info (for GetFrameByName)
+    Frame {
+        id: String,
+        name: Option<String>,
+        monitor: String,
+        workspace: usize,
+        window_count: usize,
+    },
     /// Error response
     Error { code: String, message: String },
 }

@@ -44,6 +44,8 @@ pub struct Frame {
     pub focused: usize,
     /// Whether tabs are displayed vertically (on left side) instead of horizontally (on top)
     pub vertical_tabs: bool,
+    /// Optional user-assigned name for window placement rules
+    pub name: Option<String>,
 }
 
 impl Frame {
@@ -52,6 +54,7 @@ impl Frame {
             windows: Vec::new(),
             focused: 0,
             vertical_tabs: false,
+            name: None,
         }
     }
 
@@ -61,6 +64,7 @@ impl Frame {
             windows: vec![window],
             focused: 0,
             vertical_tabs: false,
+            name: None,
         }
     }
 
@@ -684,6 +688,39 @@ impl LayoutTree {
         }
     }
 
+    /// Set the name of a frame
+    /// Does not check for uniqueness - caller is responsible for that
+    pub fn set_frame_name(&mut self, node_id: NodeId, name: Option<String>) -> bool {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(node_id) {
+            // Treat empty string as None
+            frame.name = name.filter(|s| !s.is_empty());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the name of a frame
+    pub fn get_frame_name(&self, node_id: NodeId) -> Option<&str> {
+        if let Some(Node::Frame { frame, .. }) = self.nodes.get(node_id) {
+            frame.name.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Find a frame by name within this tree
+    pub fn find_frame_by_name(&self, name: &str) -> Option<NodeId> {
+        for (id, node) in &self.nodes {
+            if let Node::Frame { frame, .. } = node {
+                if frame.name.as_deref() == Some(name) {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
     /// Reorder a tab within a frame (move from_index to to_index)
     pub fn reorder_tab(&mut self, frame_id: NodeId, from_index: usize, to_index: usize) -> bool {
         if let Some(Node::Frame { frame, .. }) = self.nodes.get_mut(frame_id) {
@@ -804,6 +841,7 @@ impl LayoutTree {
                     });
                     NodeSnapshot::Frame {
                         id: format!("{:?}", node_id),
+                        name: frame.name.clone(),
                         windows: frame.windows.clone(),
                         focused_tab: frame.focused,
                         geometry,
@@ -824,6 +862,7 @@ impl LayoutTree {
                 }
                 None => NodeSnapshot::Frame {
                     id: "invalid".to_string(),
+                    name: None,
                     windows: vec![],
                     focused_tab: 0,
                     geometry: None,
