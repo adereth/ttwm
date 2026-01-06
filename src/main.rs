@@ -3426,6 +3426,18 @@ impl Wm {
                         self.update_urgent_indicator()?;
                     }
                 }
+                // Handle strut changes for dock windows
+                if e.atom == self.atoms.net_wm_strut || e.atom == self.atoms.net_wm_strut_partial {
+                    if self.dock_windows.contains_key(&e.window) {
+                        let new_struts = self.read_struts(e.window);
+                        log::info!(
+                            "Dock 0x{:x} struts changed: top={}, bottom={}, left={}, right={}",
+                            e.window, new_struts.top, new_struts.bottom, new_struts.left, new_struts.right
+                        );
+                        self.dock_windows.insert(e.window, new_struts);
+                        self.apply_layout()?;
+                    }
+                }
             }
 
             Event::ButtonPress(e) => {
