@@ -1975,6 +1975,44 @@ impl Wm {
 
     /// Apply the current layout to all windows
     fn apply_layout(&mut self) -> Result<()> {
+        // Check for fullscreen window first - it takes over the entire screen
+        if let Some(fullscreen_window) = self.workspaces().current().fullscreen_window {
+            // Get the raw monitor geometry (no gaps, no struts)
+            let monitor = self.monitors.focused();
+            let geom = monitor.geometry;
+
+            // Configure fullscreen window to cover entire monitor
+            self.conn.configure_window(
+                fullscreen_window,
+                &ConfigureWindowAux::new()
+                    .x(geom.x)
+                    .y(geom.y)
+                    .width(geom.width)
+                    .height(geom.height)
+                    .border_width(0)
+                    .stack_mode(StackMode::ABOVE),
+            )?;
+            self.conn.map_window(fullscreen_window)?;
+            self.conn.flush()?;
+
+            // Hide all tab bars and empty frame placeholders
+            let mon_id = self.monitors.focused_id();
+            let ws_idx = self.workspaces().current_index();
+            for (&(mid, wsidx, _), &tab_win) in &self.tab_bar_windows {
+                if mid == mon_id && wsidx == ws_idx {
+                    self.conn.unmap_window(tab_win)?;
+                }
+            }
+            for (&(mid, wsidx, _), &empty_win) in &self.empty_frame_windows {
+                if mid == mon_id && wsidx == ws_idx {
+                    self.conn.unmap_window(empty_win)?;
+                }
+            }
+            self.conn.flush()?;
+
+            return Ok(());
+        }
+
         let screen_rect = self.usable_screen();
         let geometries = self.workspaces().current().layout.calculate_geometries(screen_rect, self.config.gap);
 
@@ -2697,6 +2735,15 @@ impl Wm {
             return Ok(());
         }
 
+        // Clear fullscreen if this window was fullscreen (check all workspaces)
+        for ws in &mut self.monitors.focused_mut().workspaces.workspaces {
+            if ws.fullscreen_window == Some(window) {
+                ws.fullscreen_window = None;
+                log::info!("Cleared fullscreen state for destroyed window 0x{:x}", window);
+                break;
+            }
+        }
+
         // Find which workspace contains this window (search ALL workspaces)
         let ws_idx = self.find_window_workspace(window);
 
@@ -2815,6 +2862,81 @@ impl Wm {
                 self.focus_window(window)?;
             }
         }
+
+        Ok(())
+    }
+
+    /// Toggle fullscreen mode for a window
+    /// If window is None, uses the focused window
+    fn toggle_fullscreen(&mut self, window: Option<Window>) -> Result<()> {
+        let window = match window.or(self.focused_window) {
+            Some(w) => w,
+            None => {
+                log::info!("No window to toggle fullscreen");
+                return Ok(());
+            }
+        };
+
+        let is_fullscreen = self.workspaces().current().fullscreen_window == Some(window);
+
+        if is_fullscreen {
+            // Exit fullscreen
+            log::info!("Exiting fullscreen for window 0x{:x}", window);
+            self.workspaces_mut().current_mut().fullscreen_window = None;
+
+            // Update _NET_WM_STATE to remove fullscreen
+            self.update_wm_state(window, false)?;
+        } else {
+            // Enter fullscreen
+            log::info!("Entering fullscreen for window 0x{:x}", window);
+            self.workspaces_mut().current_mut().fullscreen_window = Some(window);
+
+            // Update _NET_WM_STATE to add fullscreen
+            self.update_wm_state(window, true)?;
+        }
+
+        self.apply_layout()?;
+        self.focus_window(window)?;
+        Ok(())
+    }
+
+    /// Update _NET_WM_STATE property for fullscreen
+    fn update_wm_state(&self, window: Window, fullscreen: bool) -> Result<()> {
+        // Read current state
+        let current_states = self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_state,
+            AtomEnum::ATOM,
+            0,
+            1024,
+        )?.reply()?;
+
+        let mut states: Vec<u32> = current_states.value32()
+            .map(|iter| iter.collect())
+            .unwrap_or_default();
+
+        let fullscreen_atom = self.atoms.net_wm_state_fullscreen;
+
+        if fullscreen {
+            // Add fullscreen state if not present
+            if !states.contains(&fullscreen_atom) {
+                states.push(fullscreen_atom);
+            }
+        } else {
+            // Remove fullscreen state
+            states.retain(|&s| s != fullscreen_atom);
+        }
+
+        // Write back the state
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            self.atoms.net_wm_state,
+            AtomEnum::ATOM,
+            &states,
+        )?;
+        self.conn.flush()?;
 
         Ok(())
     }
@@ -3258,6 +3380,36 @@ impl Wm {
             log::info!("ClientMessage: _NET_WM_DESKTOP move 0x{:x} to {}", window, desktop);
 
             self.move_window_to_workspace(window, desktop)?;
+        } else if msg_type == self.atoms.net_wm_state {
+            // _NET_WM_STATE: Change window state (fullscreen, etc.)
+            // data[0]: action (0=remove, 1=add, 2=toggle)
+            // data[1], data[2]: state atoms to change
+            let data = event.data.as_data32();
+            let action = data[0];
+            let state1 = data[1];
+            let state2 = data[2];
+            let window = event.window;
+
+            log::info!(
+                "ClientMessage: _NET_WM_STATE for 0x{:x}, action={}, state1={}, state2={}",
+                window, action, state1, state2
+            );
+
+            // Check if fullscreen state is being changed
+            let fullscreen_atom = self.atoms.net_wm_state_fullscreen;
+            if state1 == fullscreen_atom || state2 == fullscreen_atom {
+                let is_fullscreen = self.workspaces().current().fullscreen_window == Some(window);
+                let should_fullscreen = match action {
+                    0 => false,        // _NET_WM_STATE_REMOVE
+                    1 => true,         // _NET_WM_STATE_ADD
+                    2 => !is_fullscreen, // _NET_WM_STATE_TOGGLE
+                    _ => is_fullscreen,
+                };
+
+                if should_fullscreen != is_fullscreen {
+                    self.toggle_fullscreen(Some(window))?;
+                }
+            }
         }
 
         Ok(())
@@ -4186,6 +4338,7 @@ impl Wm {
             WmAction::MoveTaggedToFrame => self.move_tagged_to_focused_frame()?,
             WmAction::UntagAll => self.untag_all_windows()?,
             WmAction::ToggleFloat => self.toggle_float(None)?,
+            WmAction::ToggleFullscreen => self.toggle_fullscreen(None)?,
             WmAction::ToggleVerticalTabs => self.toggle_vertical_tabs()?,
             WmAction::FocusUrgent => self.focus_urgent()?,
             WmAction::FocusMonitorLeft => self.focus_monitor_direction(Direction::Left)?,
@@ -4477,6 +4630,19 @@ impl Wm {
             IpcCommand::GetFloating => {
                 let floating: Vec<u32> = self.workspaces().current().floating_window_ids();
                 IpcResponse::Floating { windows: floating }
+            }
+            IpcCommand::ToggleFullscreen { window } => {
+                match self.toggle_fullscreen(window.map(|w| w as Window)) {
+                    Ok(()) => IpcResponse::Ok,
+                    Err(e) => IpcResponse::Error {
+                        code: "toggle_fullscreen_failed".to_string(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            IpcCommand::GetFullscreen => {
+                let fullscreen = self.workspaces().current().fullscreen_window.map(|w| w as u32);
+                IpcResponse::Fullscreen { window: fullscreen }
             }
             IpcCommand::GetUrgent => {
                 let urgent: Vec<u32> = self.urgent_windows.iter().map(|&w| w as u32).collect();

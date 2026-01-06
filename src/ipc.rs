@@ -82,6 +82,12 @@ pub enum IpcCommand {
     /// Get list of floating window IDs
     GetFloating,
 
+    // Fullscreen
+    /// Toggle fullscreen state for a window (uses focused window if not specified)
+    ToggleFullscreen { window: Option<u32> },
+    /// Get fullscreen window ID (if any)
+    GetFullscreen,
+
     // Urgent
     /// Get list of urgent window IDs (ordered oldest first)
     GetUrgent,
@@ -144,6 +150,8 @@ pub enum IpcResponse {
     Tagged { windows: Vec<u32> },
     /// List of floating window IDs
     Floating { windows: Vec<u32> },
+    /// Fullscreen window (if any)
+    Fullscreen { window: Option<u32> },
     /// List of urgent window IDs (ordered oldest first)
     Urgent { windows: Vec<u32> },
     /// Current workspace info

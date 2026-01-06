@@ -99,6 +99,7 @@ pub struct KeybindingConfig {
     pub move_tagged_windows: Option<String>,
     pub untag_all: Option<String>,
     pub toggle_float: Option<String>,
+    pub toggle_fullscreen: Option<String>,
     pub toggle_vertical_tabs: Option<String>,
     pub focus_urgent: Option<String>,
     pub focus_monitor_left: Option<String>,
@@ -139,6 +140,7 @@ pub enum WmAction {
     MoveTaggedToFrame,
     UntagAll,
     ToggleFloat,
+    ToggleFullscreen,
     ToggleVerticalTabs,
     FocusUrgent,
     FocusMonitorLeft,
@@ -225,6 +227,7 @@ impl Config {
         insert(WmAction::MoveTaggedToFrame, &self.keybindings.move_tagged_windows);
         insert(WmAction::UntagAll, &self.keybindings.untag_all);
         insert(WmAction::ToggleFloat, &self.keybindings.toggle_float);
+        insert(WmAction::ToggleFullscreen, &self.keybindings.toggle_fullscreen);
         insert(WmAction::ToggleVerticalTabs, &self.keybindings.toggle_vertical_tabs);
         insert(WmAction::FocusUrgent, &self.keybindings.focus_urgent);
         insert(WmAction::FocusMonitorLeft, &self.keybindings.focus_monitor_left);
@@ -436,6 +439,7 @@ impl Default for KeybindingConfig {
             move_tagged_windows: Some("Mod4+a".to_string()),
             untag_all: Some("Mod4+Shift+t".to_string()),
             toggle_float: Some("Mod4+f".to_string()),
+            toggle_fullscreen: Some("Mod4+Return".to_string()),
             toggle_vertical_tabs: Some("Mod4+slash".to_string()),
             focus_urgent: Some("Mod4+space".to_string()),
             focus_monitor_left: Some("Mod4+Control+Left".to_string()),

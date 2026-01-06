@@ -80,6 +80,7 @@ split_vertical = "Mod4+v"
 # Window management
 close_window = "Mod4+q"
 toggle_float = "Mod4+f"
+toggle_fullscreen = "Mod4+Return"
 toggle_vertical_tabs = "Mod4+/"
 quit = "Mod4+Control+F4"
 

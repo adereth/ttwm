@@ -31,6 +31,8 @@ pub struct Workspace {
     pub last_focused_window: Option<Window>,
     /// Floating windows in this workspace
     pub floating_windows: Vec<FloatingWindow>,
+    /// Fullscreen window in this workspace (only one at a time)
+    pub fullscreen_window: Option<Window>,
 }
 
 impl Workspace {
@@ -42,6 +44,7 @@ impl Workspace {
             layout,
             last_focused_window: None,
             floating_windows: Vec::new(),
+            fullscreen_window: None,
         }
     }
 

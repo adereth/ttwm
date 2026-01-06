@@ -34,9 +34,10 @@ pub struct Atoms {
     // Close window request
     pub net_close_window: Atom,
 
-    // Window state atoms (for urgent hints)
+    // Window state atoms (for urgent hints and fullscreen)
     pub net_wm_state: Atom,
     pub net_wm_state_demands_attention: Atom,
+    pub net_wm_state_fullscreen: Atom,
 
     // Window type atoms (for auto-float detection)
     pub net_wm_window_type: Atom,
@@ -76,6 +77,7 @@ impl Atoms {
             net_close_window: Self::intern(conn, b"_NET_CLOSE_WINDOW")?,
             net_wm_state: Self::intern(conn, b"_NET_WM_STATE")?,
             net_wm_state_demands_attention: Self::intern(conn, b"_NET_WM_STATE_DEMANDS_ATTENTION")?,
+            net_wm_state_fullscreen: Self::intern(conn, b"_NET_WM_STATE_FULLSCREEN")?,
             net_wm_window_type: Self::intern(conn, b"_NET_WM_WINDOW_TYPE")?,
             net_wm_window_type_dialog: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_DIALOG")?,
             net_wm_window_type_splash: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_SPLASH")?,

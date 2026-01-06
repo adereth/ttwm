@@ -165,6 +165,15 @@ enum Commands {
     /// Get list of floating window IDs
     Floating,
 
+    /// Toggle fullscreen state for a window
+    ToggleFullscreen {
+        /// Window ID (uses focused if not specified)
+        window: Option<String>,
+    },
+
+    /// Get fullscreen window ID (if any)
+    Fullscreen,
+
     /// Switch to a workspace (1-9) or next/prev
     Workspace {
         /// Workspace number (1-9) or "next" or "prev"
@@ -267,6 +276,11 @@ fn main() {
             serde_json::json!({"command": "toggle_float", "window": window_id})
         }
         Commands::Floating => serde_json::json!({"command": "get_floating"}),
+        Commands::ToggleFullscreen { window } => {
+            let window_id = window.as_ref().map(|w| parse_window_id(w));
+            serde_json::json!({"command": "toggle_fullscreen", "window": window_id})
+        }
+        Commands::Fullscreen => serde_json::json!({"command": "get_fullscreen"}),
         Commands::Workspace { target } => {
             let lower = target.to_lowercase();
             if lower == "next" {

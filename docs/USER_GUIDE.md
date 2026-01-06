@@ -48,6 +48,15 @@ ttwm provides **9 virtual workspaces** (desktops). Each workspace maintains its 
 
 You can manually toggle any window between tiled and floating mode with `Mod4+f`. Floating windows are per-workspace (hidden when you switch workspaces).
 
+### Fullscreen Windows
+
+**Fullscreen windows** cover the entire screen, hiding tab bars, borders, gaps, and even dock bars (like polybar). This is true fullscreen mode.
+
+- Toggle fullscreen with `Mod4+Enter`
+- Applications can request fullscreen via EWMH `_NET_WM_STATE_FULLSCREEN` (e.g., browser video fullscreen)
+- Fullscreen is per-workspace (each workspace can have its own fullscreen window)
+- Pressing `Mod4+Enter` again exits fullscreen and restores the normal layout
+
 ### Urgent Windows
 
 **Urgent windows** are windows that request attention using the `_NET_WM_STATE_DEMANDS_ATTENTION` hint. This is typically triggered by:
@@ -160,6 +169,7 @@ All keyboard shortcuts use `Mod4` (the Super/Windows key) as the primary modifie
 |----------|--------|
 | `Mod4+q` | Close focused window |
 | `Mod4+f` | Toggle floating mode for focused window |
+| `Mod4+Enter` | Toggle fullscreen mode for focused window |
 | `Mod4+/` | Toggle vertical tabs for focused frame |
 | `Mod4+Control+F4` | Quit ttwm |
 
@@ -355,7 +365,7 @@ All available keybinding options:
 - `move_window_left`, `move_window_right`
 - `resize_shrink`, `resize_grow`
 - `split_horizontal`, `split_vertical`
-- `close_window`, `toggle_float`, `toggle_vertical_tabs`, `quit`
+- `close_window`, `toggle_float`, `toggle_fullscreen`, `toggle_vertical_tabs`, `quit`
 - `workspace_next`, `workspace_prev`
 - `tag_window`, `move_tagged_windows`, `untag_all`
 - `focus_monitor_left`, `focus_monitor_right`
@@ -440,6 +450,11 @@ ttwmctl tagged                 # List tagged window IDs
 ttwmctl toggle-float           # Toggle floating for focused window
 ttwmctl toggle-float 0x1c00004 # Toggle floating for specific window
 ttwmctl floating               # List floating window IDs
+
+# Fullscreen commands
+ttwmctl toggle-fullscreen           # Toggle fullscreen for focused window
+ttwmctl toggle-fullscreen 0x1c00004 # Toggle fullscreen for specific window
+ttwmctl fullscreen                  # Get fullscreen window ID (if any)
 
 # Urgent window commands
 ttwmctl urgent                 # List urgent window IDs (oldest first)
