@@ -38,6 +38,9 @@ dirs = "5"
 # Font rendering
 freetype-rs = "0.35"
 
+# Lazy static initialization
+once_cell = "1.19"
+
 [[bin]]
 name = "ttwm"
 path = "src/main.rs"

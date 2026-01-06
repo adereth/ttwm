@@ -31,7 +31,7 @@ use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
 use layout::{Direction, NodeId, Rect, SplitDirection};
 use monitor::{MonitorId, MonitorManager};
 use workspaces::{WorkspaceManager, NUM_WORKSPACES};
-use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color, darken_color};
+use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color, darken_color, DEFAULT_ICON};
 use state::{StateTransition, UnmanageReason};
 use tracing::EventTracer;
 use types::StrutPartial;
@@ -1436,24 +1436,23 @@ impl Wm {
 
         // Draw icon centered in tab
         const ICON_SIZE: u32 = 20;
-        if let Some(icon) = self.get_window_icon(client_window) {
-            let blended = blend_icon_with_background(&icon.pixels, bg_color, ICON_SIZE);
-            let icon_x = ((width - ICON_SIZE) / 2) as i16;
-            let icon_y = y + ((height - ICON_SIZE) / 2) as i16;
+        let icon = self.get_window_icon(client_window);
+        let blended = blend_icon_with_background(&icon.pixels, bg_color, ICON_SIZE);
+        let icon_x = ((width - ICON_SIZE) / 2) as i16;
+        let icon_y = y + ((height - ICON_SIZE) / 2) as i16;
 
-            self.conn.put_image(
-                ImageFormat::Z_PIXMAP,
-                window,
-                self.gc,
-                ICON_SIZE as u16,
-                ICON_SIZE as u16,
-                icon_x,
-                icon_y,
-                0,
-                24,
-                &blended,
-            )?;
-        }
+        self.conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            window,
+            self.gc,
+            ICON_SIZE as u16,
+            ICON_SIZE as u16,
+            icon_x,
+            icon_y,
+            0,
+            24,
+            &blended,
+        )?;
 
         Ok(())
     }
@@ -1563,31 +1562,27 @@ impl Wm {
 
         // Draw icon if enabled
         if show_icons {
-            if let Some(icon) = self.get_window_icon(client_window) {
-                // Blend icon with tab background and render
-                let blended = blend_icon_with_background(&icon.pixels, bg_color, icon_size);
+            let icon = self.get_window_icon(client_window);
+            // Blend icon with tab background and render
+            let blended = blend_icon_with_background(&icon.pixels, bg_color, icon_size);
 
-                let icon_x = x + h_padding;
-                let icon_y = ((height - icon_size) / 2) as i16;
+            let icon_x = x + h_padding;
+            let icon_y = ((height - icon_size) / 2) as i16;
 
-                self.conn.put_image(
-                    ImageFormat::Z_PIXMAP,
-                    window,
-                    self.gc,
-                    icon_size as u16,
-                    icon_size as u16,
-                    icon_x,
-                    icon_y,
-                    0,
-                    24, // 24-bit depth
-                    &blended,
-                )?;
+            self.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                window,
+                self.gc,
+                icon_size as u16,
+                icon_size as u16,
+                icon_x,
+                icon_y,
+                0,
+                24, // 24-bit depth
+                &blended,
+            )?;
 
-                content_offset = icon_size as i16 + icon_padding;
-            } else {
-                // No icon available, but still reserve space for consistency
-                content_offset = icon_size as i16 + icon_padding;
-            }
+            content_offset = icon_size as i16 + icon_padding;
         }
 
         // Get window title and truncate if needed
@@ -1806,22 +1801,24 @@ impl Wm {
         format!("0x{:x}", window)
     }
 
-    /// Get window icon from _NET_WM_ICON property, scaled to 20x20 BGRA
-    fn get_window_icon(&mut self, window: Window) -> Option<&CachedIcon> {
+    /// Get window icon from _NET_WM_ICON property, scaled to 20x20 BGRA.
+    /// Returns a static default icon if the window has no icon.
+    fn get_window_icon(&mut self, window: Window) -> &CachedIcon {
         const ICON_SIZE: u32 = 20;
 
         // Check cache first
         if self.icon_cache.contains_key(&window) {
-            return self.icon_cache.get(&window);
+            return self.icon_cache.get(&window).unwrap();
         }
 
         // Try to fetch _NET_WM_ICON - only cache if we get an actual icon
         if let Some(icon) = self.fetch_and_process_icon(window, ICON_SIZE) {
             self.icon_cache.insert(window, icon);
-            self.icon_cache.get(&window)
-        } else {
-            None // Don't cache missing icons - will retry on next redraw
+            return self.icon_cache.get(&window).unwrap();
         }
+
+        // Return default icon for windows without _NET_WM_ICON
+        &DEFAULT_ICON
     }
 
     /// Fetch _NET_WM_ICON and process it into a 20x20 BGRA image

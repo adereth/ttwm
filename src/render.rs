@@ -6,6 +6,10 @@
 use std::path::PathBuf;
 use anyhow::{Context, Result};
 use freetype::Library as FtLibrary;
+use once_cell::sync::Lazy;
+
+/// Static default icon for windows without _NET_WM_ICON
+pub static DEFAULT_ICON: Lazy<CachedIcon> = Lazy::new(CachedIcon::default_icon);
 
 /// Tab bar rendering constants
 #[allow(dead_code)]
@@ -28,6 +32,48 @@ pub mod constants {
 pub struct CachedIcon {
     /// BGRA pixel data (20 * 20 * 4 = 1600 bytes)
     pub pixels: Vec<u8>,
+}
+
+impl CachedIcon {
+    /// Create a default icon for windows without _NET_WM_ICON
+    pub fn default_icon() -> Self {
+        CachedIcon { pixels: generate_default_icon() }
+    }
+}
+
+/// Generate a default 20x20 window icon (BGRA format)
+/// Design: Simple window outline with title bar
+pub fn generate_default_icon() -> Vec<u8> {
+    const SIZE: usize = 20;
+    let mut pixels = vec![0u8; SIZE * SIZE * 4];
+
+    // Colors (BGRA format)
+    let border = [0x88, 0x88, 0x88, 0xFF];      // Gray border
+    let title_bar = [0xAA, 0xAA, 0xAA, 0xFF];   // Lighter gray title bar
+    let background = [0x3A, 0x3A, 0x3A, 0xFF];  // Dark background
+    let transparent = [0x00, 0x00, 0x00, 0x00]; // Transparent
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let idx = (y * SIZE + x) * 4;
+            let pixel = if x < 2 || x >= 18 || y < 2 || y >= 18 {
+                // Outside main area - transparent with padding
+                transparent
+            } else if x == 2 || x == 17 || y == 2 || y == 17 {
+                // Border
+                border
+            } else if y >= 3 && y <= 5 {
+                // Title bar area (3 pixels tall)
+                title_bar
+            } else {
+                // Window content area
+                background
+            };
+            pixels[idx..idx + 4].copy_from_slice(&pixel);
+        }
+    }
+
+    pixels
 }
 
 /// Font renderer using FreeType for anti-aliased text
