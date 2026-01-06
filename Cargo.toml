@@ -41,6 +41,12 @@ freetype-rs = "0.35"
 # Lazy static initialization
 once_cell = "1.19"
 
+# Shell path expansion for startup commands
+shellexpand = "3"
+
+# POSIX system calls (for process detachment)
+libc = "0.2"
+
 [[bin]]
 name = "ttwm"
 path = "src/main.rs"

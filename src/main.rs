@@ -10,6 +10,7 @@ mod ipc;
 mod layout;
 mod monitor;
 mod render;
+mod startup;
 mod state;
 mod tracing;
 mod types;
@@ -229,6 +230,10 @@ struct Wm {
     urgent_indicator: Option<Window>,
     /// Dock windows (polybar, etc.) and their strut reservations
     dock_windows: HashMap<Window, StrutPartial>,
+    /// Startup manager for initial layout and app spawning
+    startup_manager: startup::StartupManager,
+    /// User configuration (kept for startup config reference)
+    user_config: Config,
 }
 
 impl Wm {
@@ -456,6 +461,8 @@ impl Wm {
             urgent_windows: Vec::new(),
             urgent_indicator: None,
             dock_windows: HashMap::new(),
+            startup_manager: startup::StartupManager::new(),
+            user_config,
         })
     }
 
@@ -5019,6 +5026,47 @@ impl Wm {
 
         Ok(())
     }
+
+    /// Apply startup configuration to all monitors
+    fn apply_startup_config(&mut self) -> Result<()> {
+        if self.user_config.startup.workspace.is_empty() {
+            log::info!("No startup layout configuration found");
+            return Ok(());
+        }
+
+        log::info!("Applying startup layout configuration");
+
+        // Apply to each monitor's workspaces
+        for (_monitor_id, monitor) in self.monitors.iter_mut() {
+            let spawns = self.startup_manager.apply_config(
+                &self.user_config.startup,
+                &mut monitor.workspaces.workspaces,
+            );
+
+            // Log what we're going to spawn
+            for spawn in &spawns {
+                let frame_info = spawn
+                    .frame_name
+                    .as_ref()
+                    .map(|n| format!(" in frame '{}'", n))
+                    .unwrap_or_default();
+                log::info!(
+                    "Startup: will spawn '{}' on workspace {}{}",
+                    spawn.command,
+                    spawn.workspace_idx + 1,
+                    frame_info
+                );
+            }
+        }
+
+        // Spawn all apps at once
+        self.startup_manager.spawn_all();
+
+        // Apply layout to show the configured frames
+        self.apply_layout()?;
+
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -5040,6 +5088,9 @@ fn main() -> Result<()> {
 
     // Grab our keybindings
     wm.grab_keys()?;
+
+    // Apply startup layout configuration
+    wm.apply_startup_config()?;
 
     // Manage any existing windows
     wm.scan_existing_windows()?;

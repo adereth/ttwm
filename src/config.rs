@@ -16,6 +16,7 @@ pub struct Config {
     pub colors: ColorConfig,
     pub keybindings: KeybindingConfig,
     pub exec: ExecConfig,
+    pub startup: StartupConfig,
 }
 
 /// Exec keybindings (key combo -> command to run)
@@ -24,6 +25,72 @@ pub struct Config {
 pub struct ExecConfig {
     #[serde(flatten)]
     pub bindings: HashMap<String, String>,
+}
+
+/// Startup layout configuration
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct StartupConfig {
+    /// Per-workspace layout configurations, keyed by workspace number as string ("1"-"9")
+    #[serde(default)]
+    pub workspace: HashMap<String, WorkspaceStartup>,
+}
+
+/// Configuration for a single workspace's startup layout
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorkspaceStartup {
+    /// The layout tree definition
+    pub layout: LayoutNodeConfig,
+}
+
+/// Recursive enum representing either a frame or a split in the layout tree
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum LayoutNodeConfig {
+    /// A leaf frame that can contain windows
+    Frame(FrameConfig),
+    /// A split node with two children
+    Split(SplitConfig),
+}
+
+/// Configuration for a frame (leaf node)
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct FrameConfig {
+    /// Optional name for the frame (used for window placement rules)
+    pub name: Option<String>,
+    /// Whether tabs should be displayed vertically
+    #[serde(default)]
+    pub vertical_tabs: bool,
+    /// Applications to spawn in this frame at startup
+    #[serde(default)]
+    pub apps: Vec<String>,
+}
+
+/// Configuration for a split node
+#[derive(Debug, Deserialize, Clone)]
+pub struct SplitConfig {
+    /// Split direction: "horizontal" or "vertical"
+    pub direction: SplitDirectionConfig,
+    /// Ratio of space given to first child (0.0 to 1.0, default 0.5)
+    #[serde(default = "default_ratio")]
+    pub ratio: f32,
+    /// First child (left or top)
+    pub first: Box<LayoutNodeConfig>,
+    /// Second child (right or bottom)
+    pub second: Box<LayoutNodeConfig>,
+}
+
+/// Split direction for config parsing
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitDirectionConfig {
+    Horizontal,
+    Vertical,
+}
+
+fn default_ratio() -> f32 {
+    0.5
 }
 
 /// General settings
@@ -493,5 +560,85 @@ mod tests {
         assert_eq!(key_to_keysym("tab"), Some(0xff09));
         assert_eq!(key_to_keysym("h"), Some(0x68));
         assert_eq!(key_to_keysym("1"), Some(0x31));
+    }
+
+    #[test]
+    fn test_startup_config_simple_frame() {
+        let toml = r#"
+[startup.workspace.1]
+layout = { type = "frame", name = "main", apps = ["alacritty"] }
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.startup.workspace.contains_key("1"));
+        let ws = &config.startup.workspace["1"];
+        match &ws.layout {
+            LayoutNodeConfig::Frame(frame) => {
+                assert_eq!(frame.name, Some("main".to_string()));
+                assert_eq!(frame.apps, vec!["alacritty".to_string()]);
+                assert!(!frame.vertical_tabs);
+            }
+            _ => panic!("Expected frame"),
+        }
+    }
+
+    #[test]
+    fn test_startup_config_nested_split() {
+        let toml = r#"
+[startup.workspace.1]
+layout = { type = "split", direction = "horizontal", ratio = 0.6, first = { type = "frame", name = "editor" }, second = { type = "split", direction = "vertical", ratio = 0.5, first = { type = "frame", name = "terminal" }, second = { type = "frame", name = "browser", vertical_tabs = true } } }
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let ws = &config.startup.workspace["1"];
+        match &ws.layout {
+            LayoutNodeConfig::Split(split) => {
+                assert!(matches!(split.direction, SplitDirectionConfig::Horizontal));
+                assert!((split.ratio - 0.6).abs() < 0.01);
+                // Check first child is frame "editor"
+                match split.first.as_ref() {
+                    LayoutNodeConfig::Frame(f) => {
+                        assert_eq!(f.name, Some("editor".to_string()));
+                    }
+                    _ => panic!("Expected frame"),
+                }
+                // Check second child is a vertical split
+                match split.second.as_ref() {
+                    LayoutNodeConfig::Split(s2) => {
+                        assert!(matches!(s2.direction, SplitDirectionConfig::Vertical));
+                        // Check browser frame has vertical_tabs
+                        match s2.second.as_ref() {
+                            LayoutNodeConfig::Frame(f) => {
+                                assert_eq!(f.name, Some("browser".to_string()));
+                                assert!(f.vertical_tabs);
+                            }
+                            _ => panic!("Expected frame"),
+                        }
+                    }
+                    _ => panic!("Expected split"),
+                }
+            }
+            _ => panic!("Expected split"),
+        }
+    }
+
+    #[test]
+    fn test_startup_config_default_ratio() {
+        let toml = r#"
+[startup.workspace.2]
+layout = { type = "split", direction = "vertical", first = { type = "frame" }, second = { type = "frame" } }
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let ws = &config.startup.workspace["2"];
+        match &ws.layout {
+            LayoutNodeConfig::Split(split) => {
+                assert!((split.ratio - 0.5).abs() < 0.01); // Default ratio
+            }
+            _ => panic!("Expected split"),
+        }
+    }
+
+    #[test]
+    fn test_startup_config_empty() {
+        let config = Config::default();
+        assert!(config.startup.workspace.is_empty());
     }
 }

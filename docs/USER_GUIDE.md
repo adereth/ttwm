@@ -10,6 +10,7 @@ ttwm (Tabbed Tiling Window Manager) is a minimal X11 tiling window manager inspi
 4. [Keyboard Shortcuts](#keyboard-shortcuts)
 5. [Mouse Interactions](#mouse-interactions)
 6. [Configuration](#configuration)
+   - [Startup Layouts](#startup-layout-settings)
 7. [IPC and ttwmctl](#ipc-and-ttwmctl)
 8. [Troubleshooting](#troubleshooting)
 
@@ -383,6 +384,59 @@ Run programs with keybindings using the `[exec]` section. Format: `"Modifier+Key
 # Run htop in alacritty with Mod4+Shift+x
 "Mod4+Shift+x" = "alacritty -e htop"
 ```
+
+### Startup Layout Settings
+
+Define initial layouts and spawn applications automatically when ttwm starts using the `[startup]` section. Each workspace (1-9) can have its own layout tree.
+
+Layout nodes are either:
+- **frame**: A leaf node that contains windows (displayed as tabs)
+- **split**: An internal node that divides space between two children
+
+**Frame options:**
+- `name`: Optional frame name (for identification)
+- `vertical_tabs`: Display tabs vertically on the left (default: false)
+- `apps`: List of commands to spawn in this frame
+
+**Split options:**
+- `direction`: `"horizontal"` (side-by-side) or `"vertical"` (stacked)
+- `ratio`: Split ratio from 0.1 to 0.9 (default: 0.5)
+- `first`: First child node (left for horizontal, top for vertical)
+- `second`: Second child node (right for horizontal, bottom for vertical)
+
+**Example: Development workspace with 60/40 split**
+```toml
+[startup.workspace.1]
+layout = { type = "split", direction = "horizontal", ratio = 0.6, first = { type = "frame", name = "editor", apps = ["code ~/projects"] }, second = { type = "split", direction = "vertical", ratio = 0.5, first = { type = "frame", name = "terminal", apps = ["alacritty"] }, second = { type = "frame", name = "browser", apps = ["firefox"] } } }
+```
+
+This creates:
+```
++---------------------------+---------------+
+|                           |   terminal    |
+|          editor           +---------------+
+|          (60%)            |    browser    |
+|                           |               |
++---------------------------+---------------+
+```
+
+**Example: Simple single-frame workspace**
+```toml
+[startup.workspace.2]
+layout = { type = "frame", name = "scratch" }
+```
+
+**Example: Vertical split with vertical tabs**
+```toml
+[startup.workspace.3]
+layout = { type = "split", direction = "vertical", ratio = 0.7, first = { type = "frame", name = "main", apps = ["alacritty"] }, second = { type = "frame", name = "references", vertical_tabs = true, apps = ["firefox"] } }
+```
+
+**Notes:**
+- Paths support tilde expansion (e.g., `~/projects` expands to your home directory)
+- Apps are spawned after the layout is created, so they appear in their designated frames
+- If an app fails to spawn, ttwm logs an error and continues with the remaining apps
+- Startup layouts are applied before scanning for existing windows
 
 ---
 

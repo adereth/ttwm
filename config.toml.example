@@ -105,3 +105,36 @@ focus_monitor_right = "Mod4+Control+Right"
 # Format: "Modifier+Key" = "command [args...]"
 "Mod4+x" = "alacritty"
 "Mod4+r" = "gmrun"
+
+# =============================================================================
+# Startup Layout Configuration
+# =============================================================================
+# Define initial layouts and spawn applications when ttwm starts.
+# Each workspace (1-9) can have its own layout tree.
+#
+# Layout nodes are either:
+#   - frame: A leaf node that contains windows (tabs)
+#   - split: An internal node that divides space between two children
+#
+# Frame options:
+#   - name: Optional frame name (for identification)
+#   - vertical_tabs: Display tabs vertically on the left (default: false)
+#   - apps: List of commands to spawn in this frame
+#
+# Split options:
+#   - direction: "horizontal" (side-by-side) or "vertical" (stacked)
+#   - ratio: Split ratio from 0.1 to 0.9 (default: 0.5)
+#   - first: First child node (left/top)
+#   - second: Second child node (right/bottom)
+
+# Example: Development workspace with editor, terminal, and browser
+# [startup.workspace.1]
+# layout = { type = "split", direction = "horizontal", ratio = 0.6, first = { type = "frame", name = "editor", apps = ["code ~/projects"] }, second = { type = "split", direction = "vertical", ratio = 0.5, first = { type = "frame", name = "terminal", apps = ["alacritty"] }, second = { type = "frame", name = "browser", apps = ["firefox"] } } }
+
+# Example: Simple single-frame workspace
+# [startup.workspace.2]
+# layout = { type = "frame", name = "scratch" }
+
+# Example: Vertical split with vertical tabs on one side
+# [startup.workspace.3]
+# layout = { type = "split", direction = "vertical", ratio = 0.7, first = { type = "frame", name = "main", apps = ["alacritty"] }, second = { type = "frame", name = "references", vertical_tabs = true, apps = ["firefox"] } }

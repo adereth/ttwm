@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
+use std::collections::HashMap;
 use x11rb::protocol::xproto::Window;
 
+use crate::config::{FrameConfig, LayoutNodeConfig, SplitConfig, SplitDirectionConfig};
 pub use crate::types::Rect;
 
 // Generate unique key types for our arena
@@ -879,6 +881,122 @@ impl LayoutTree {
     pub fn focused_frame_id(&self) -> String {
         format!("{:?}", self.focused)
     }
+
+    /// Build a layout tree from a config definition
+    /// Returns (tree, pending_apps) where pending_apps maps NodeId -> Vec<command>
+    pub fn from_config(config: &LayoutNodeConfig) -> (Self, HashMap<NodeId, Vec<String>>) {
+        let mut nodes = SlotMap::with_key();
+        let mut pending_apps: HashMap<NodeId, Vec<String>> = HashMap::new();
+
+        let root = Self::build_node_from_config(config, None, &mut nodes, &mut pending_apps);
+
+        // Find the first frame to set as focused
+        let focused = Self::find_first_frame_static(&nodes, root).unwrap_or(root);
+
+        let tree = Self {
+            nodes,
+            root,
+            focused,
+        };
+
+        (tree, pending_apps)
+    }
+
+    /// Recursively build nodes from config
+    fn build_node_from_config(
+        config: &LayoutNodeConfig,
+        parent: Option<NodeId>,
+        nodes: &mut SlotMap<NodeId, Node>,
+        pending_apps: &mut HashMap<NodeId, Vec<String>>,
+    ) -> NodeId {
+        match config {
+            LayoutNodeConfig::Frame(frame_config) => {
+                Self::build_frame_from_config(frame_config, parent, nodes, pending_apps)
+            }
+            LayoutNodeConfig::Split(split_config) => {
+                Self::build_split_from_config(split_config, parent, nodes, pending_apps)
+            }
+        }
+    }
+
+    fn build_frame_from_config(
+        config: &FrameConfig,
+        parent: Option<NodeId>,
+        nodes: &mut SlotMap<NodeId, Node>,
+        pending_apps: &mut HashMap<NodeId, Vec<String>>,
+    ) -> NodeId {
+        let frame = Frame {
+            windows: Vec::new(),
+            focused: 0,
+            vertical_tabs: config.vertical_tabs,
+            name: config.name.clone().filter(|s| !s.is_empty()),
+        };
+        let node_id = nodes.insert(Node::Frame { frame, parent });
+
+        // Record pending apps for this frame
+        if !config.apps.is_empty() {
+            pending_apps.insert(node_id, config.apps.clone());
+        }
+
+        node_id
+    }
+
+    fn build_split_from_config(
+        config: &SplitConfig,
+        parent: Option<NodeId>,
+        nodes: &mut SlotMap<NodeId, Node>,
+        pending_apps: &mut HashMap<NodeId, Vec<String>>,
+    ) -> NodeId {
+        // Create a placeholder frame first to get an ID for parent references
+        let placeholder_id = nodes.insert(Node::Frame {
+            frame: Frame::new(),
+            parent,
+        });
+
+        // Build children with placeholder as parent
+        let first_id =
+            Self::build_node_from_config(&config.first, Some(placeholder_id), nodes, pending_apps);
+        let second_id =
+            Self::build_node_from_config(&config.second, Some(placeholder_id), nodes, pending_apps);
+
+        // Replace placeholder with actual split node
+        let direction = match config.direction {
+            SplitDirectionConfig::Horizontal => SplitDirection::Horizontal,
+            SplitDirectionConfig::Vertical => SplitDirection::Vertical,
+        };
+        let split = Split {
+            direction,
+            first: first_id,
+            second: second_id,
+            ratio: config.ratio.clamp(0.1, 0.9),
+        };
+        nodes[placeholder_id] = Node::Split { split, parent };
+
+        placeholder_id
+    }
+
+    /// Find the first frame in the tree (depth-first, left-first)
+    /// Static version for use during construction
+    fn find_first_frame_static(nodes: &SlotMap<NodeId, Node>, node_id: NodeId) -> Option<NodeId> {
+        match nodes.get(node_id)? {
+            Node::Frame { .. } => Some(node_id),
+            Node::Split { split, .. } => Self::find_first_frame_static(nodes, split.first)
+                .or_else(|| Self::find_first_frame_static(nodes, split.second)),
+        }
+    }
+
+    /// Replace the entire tree with a new one built from config
+    /// Returns pending apps map
+    pub fn replace_from_config(
+        &mut self,
+        config: &LayoutNodeConfig,
+    ) -> HashMap<NodeId, Vec<String>> {
+        let (new_tree, pending_apps) = Self::from_config(config);
+        self.nodes = new_tree.nodes;
+        self.root = new_tree.root;
+        self.focused = new_tree.focused;
+        pending_apps
+    }
 }
 
 #[cfg(test)]
@@ -1551,5 +1669,137 @@ mod tests {
 
         // Moving nonexistent window should fail
         assert!(!tree.move_window_to_frame(9999, source_frame, target_frame));
+    }
+
+    // ==================== From Config Tests ====================
+
+    #[test]
+    fn test_from_config_single_frame() {
+        use crate::config::FrameConfig;
+
+        let config = LayoutNodeConfig::Frame(FrameConfig {
+            name: Some("main".to_string()),
+            vertical_tabs: false,
+            apps: vec!["alacritty".to_string()],
+        });
+
+        let (tree, pending_apps) = LayoutTree::from_config(&config);
+
+        // Should have exactly one frame
+        assert_eq!(tree.all_frames().len(), 1);
+
+        // Frame should have the configured name
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.name, Some("main".to_string()));
+
+        // Should have pending apps
+        assert_eq!(pending_apps.len(), 1);
+        let apps = pending_apps.values().next().unwrap();
+        assert_eq!(apps, &vec!["alacritty".to_string()]);
+    }
+
+    #[test]
+    fn test_from_config_horizontal_split() {
+        use crate::config::{FrameConfig, SplitConfig, SplitDirectionConfig};
+
+        let config = LayoutNodeConfig::Split(SplitConfig {
+            direction: SplitDirectionConfig::Horizontal,
+            ratio: 0.6,
+            first: Box::new(LayoutNodeConfig::Frame(FrameConfig {
+                name: Some("left".to_string()),
+                vertical_tabs: false,
+                apps: vec![],
+            })),
+            second: Box::new(LayoutNodeConfig::Frame(FrameConfig {
+                name: Some("right".to_string()),
+                vertical_tabs: true,
+                apps: vec!["firefox".to_string()],
+            })),
+        });
+
+        let (tree, pending_apps) = LayoutTree::from_config(&config);
+
+        // Should have 2 frames
+        assert_eq!(tree.all_frames().len(), 2);
+
+        // Root should be a split
+        let split = tree.get(tree.root).unwrap().as_split().unwrap();
+        assert_eq!(split.direction, SplitDirection::Horizontal);
+        assert!((split.ratio - 0.6).abs() < 0.01);
+
+        // Should have pending apps for one frame
+        assert_eq!(pending_apps.len(), 1);
+    }
+
+    #[test]
+    fn test_from_config_nested_split() {
+        use crate::config::{FrameConfig, SplitConfig, SplitDirectionConfig};
+
+        let config = LayoutNodeConfig::Split(SplitConfig {
+            direction: SplitDirectionConfig::Horizontal,
+            ratio: 0.6,
+            first: Box::new(LayoutNodeConfig::Frame(FrameConfig::default())),
+            second: Box::new(LayoutNodeConfig::Split(SplitConfig {
+                direction: SplitDirectionConfig::Vertical,
+                ratio: 0.5,
+                first: Box::new(LayoutNodeConfig::Frame(FrameConfig::default())),
+                second: Box::new(LayoutNodeConfig::Frame(FrameConfig::default())),
+            })),
+        });
+
+        let (tree, _) = LayoutTree::from_config(&config);
+
+        // Should have 3 frames
+        assert_eq!(tree.all_frames().len(), 3);
+    }
+
+    #[test]
+    fn test_from_config_focuses_first_frame() {
+        use crate::config::{FrameConfig, SplitConfig, SplitDirectionConfig};
+
+        let config = LayoutNodeConfig::Split(SplitConfig {
+            direction: SplitDirectionConfig::Horizontal,
+            ratio: 0.5,
+            first: Box::new(LayoutNodeConfig::Frame(FrameConfig {
+                name: Some("first".to_string()),
+                ..Default::default()
+            })),
+            second: Box::new(LayoutNodeConfig::Frame(FrameConfig {
+                name: Some("second".to_string()),
+                ..Default::default()
+            })),
+        });
+
+        let (tree, _) = LayoutTree::from_config(&config);
+
+        // Should focus the first (left) frame
+        let focused = tree.focused_frame().unwrap();
+        assert_eq!(focused.name, Some("first".to_string()));
+    }
+
+    #[test]
+    fn test_replace_from_config() {
+        use crate::config::FrameConfig;
+
+        let mut tree = LayoutTree::new();
+        tree.add_window(1001);
+        tree.add_window(1002);
+
+        // Replace with a simple config
+        let config = LayoutNodeConfig::Frame(FrameConfig {
+            name: Some("replaced".to_string()),
+            vertical_tabs: true,
+            apps: vec![],
+        });
+
+        let _ = tree.replace_from_config(&config);
+
+        // Tree should now have single frame with the new config
+        assert_eq!(tree.all_frames().len(), 1);
+        let frame = tree.focused_frame().unwrap();
+        assert_eq!(frame.name, Some("replaced".to_string()));
+        assert!(frame.vertical_tabs);
+        // Windows should be gone (replaced tree has no windows)
+        assert!(frame.windows.is_empty());
     }
 }
