@@ -16,6 +16,7 @@ mod state;
 mod tab_bar;
 mod tracing;
 mod types;
+mod urgent;
 mod window_query;
 mod workspaces;
 
@@ -39,6 +40,7 @@ use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color
 use state::{StateTransition, UnmanageReason};
 use tracing::EventTracer;
 use types::StrutPartial;
+use urgent::UrgentManager;
 
 /// Layout configuration
 struct LayoutConfig {
@@ -227,10 +229,8 @@ struct Wm {
     suppress_enter_focus: bool,
     /// Skip tab bar redraw in focus_window() when apply_layout() just did it
     skip_focus_tab_bar_redraw: bool,
-    /// Windows that are urgent (FIFO order - oldest first)
-    urgent_windows: Vec<Window>,
-    /// Overlay window for cross-workspace urgent indicator
-    urgent_indicator: Option<Window>,
+    /// Urgent window manager (tracks urgent windows and indicator)
+    urgent: UrgentManager,
     /// Dock windows (polybar, etc.) and their strut reservations
     dock_windows: HashMap<Window, StrutPartial>,
     /// Startup manager for initial layout and app spawning
@@ -461,8 +461,7 @@ impl Wm {
             tagged_windows: std::collections::HashSet::new(),
             suppress_enter_focus: false,
             skip_focus_tab_bar_redraw: false,
-            urgent_windows: Vec::new(),
-            urgent_indicator: None,
+            urgent: UrgentManager::new(),
             dock_windows: HashMap::new(),
             startup_manager: startup::StartupManager::new(),
             user_config,
@@ -1161,7 +1160,7 @@ impl Wm {
         let corner_radius: u32 = 4; // Smaller radius for vertical tabs (vs 6px for horizontal)
 
         // Determine background color (same priority as horizontal)
-        let is_urgent = self.urgent_windows.contains(&client_window);
+        let is_urgent = self.urgent.contains(client_window);
         let bg_color = if is_tagged {
             self.config.tab_tagged_bg
         } else if is_focused && is_focused_frame {
@@ -1282,7 +1281,7 @@ impl Wm {
 
         // Tab background color (5 states: tagged, focused, urgent, visible-unfocused, background)
         // Priority: tagged > focused > urgent > visible-unfocused > background
-        let is_urgent = self.urgent_windows.contains(&client_window);
+        let is_urgent = self.urgent.contains(client_window);
         let bg_color = if is_tagged {
             self.config.tab_tagged_bg                 // #1 - Tagged
         } else if is_focused && is_focused_frame {
@@ -1965,7 +1964,7 @@ impl Wm {
     /// Update the urgent indicator visibility based on urgent windows on other workspaces
     fn update_urgent_indicator(&mut self) -> Result<()> {
         let current_ws = self.workspaces().current_index();
-        let has_other_ws_urgent = self.urgent_windows.iter().any(|&w| {
+        let has_other_ws_urgent = self.urgent.iter().any(|&w| {
             self.find_window_workspace(w) != Some(current_ws)
         });
 
@@ -1979,73 +1978,90 @@ impl Wm {
 
     /// Show the urgent indicator in the upper-right corner
     fn show_urgent_indicator(&mut self) -> Result<()> {
-        let screen = self.screen();
-        let size = 16u16;
-        let x = screen.width_in_pixels as i16 - size as i16 - 10;
-        let y = 10i16;
-
-        if self.urgent_indicator.is_none() {
-            let window = self.conn.generate_id()?;
-            self.conn.create_window(
-                x11rb::COPY_DEPTH_FROM_PARENT,
-                window,
+        // Create indicator window if it doesn't exist
+        if self.urgent.indicator().is_none() {
+            let screen = self.screen();
+            let window = urgent::create_indicator(
+                &self.conn,
                 self.root,
-                x, y,
-                size, size,
-                0,
-                WindowClass::INPUT_OUTPUT,
-                x11rb::COPY_FROM_PARENT,
-                &CreateWindowAux::new()
-                    .background_pixel(self.config.tab_urgent_bg)
-                    .override_redirect(1), // Don't manage this window
+                self.config.tab_urgent_bg,
+                screen.width_in_pixels,
             )?;
-            self.urgent_indicator = Some(window);
+            self.urgent.set_indicator(window);
         }
 
-        let window = self.urgent_indicator.unwrap();
-        self.conn.map_window(window)?;
-        self.conn.configure_window(window, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
-
-        // Draw a filled circle
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_urgent_bg))?;
-        self.conn.poly_fill_arc(
-            window,
-            self.gc,
-            &[Arc {
-                x: 0,
-                y: 0,
-                width: size,
-                height: size,
-                angle1: 0,
-                angle2: 360 * 64, // Full circle (angles in 1/64 degree units)
-            }],
-        )?;
-        self.conn.flush()?;
+        // Show and draw the indicator
+        if let Some(window) = self.urgent.indicator() {
+            urgent::show_indicator(&self.conn, self.gc, window, self.config.tab_urgent_bg)?;
+        }
         Ok(())
     }
 
     /// Hide the urgent indicator
     fn hide_urgent_indicator(&mut self) -> Result<()> {
-        if let Some(window) = self.urgent_indicator {
-            self.conn.unmap_window(window)?;
-            self.conn.flush()?;
+        if let Some(window) = self.urgent.indicator() {
+            urgent::hide_indicator(&self.conn, window)?;
         }
         Ok(())
     }
 
     /// Focus the oldest urgent window (FIFO order)
     fn focus_urgent(&mut self) -> Result<()> {
-        if let Some(&window) = self.urgent_windows.first() {
+        log::info!("focus_urgent: called");
+        if let Some(window) = self.urgent.first() {
+            log::info!("focus_urgent: urgent window is 0x{:x}", window);
             // Find which workspace contains this window
             if let Some(workspace_idx) = self.find_window_workspace(window) {
+                log::info!("focus_urgent: window found on workspace {}", workspace_idx);
+                let current_ws = self.workspaces().current_index();
+                log::info!("focus_urgent: current workspace is {}", current_ws);
+
                 // Switch to that workspace if needed
                 if let Some(old_idx) = self.workspaces_mut().switch_to(workspace_idx) {
+                    log::info!("focus_urgent: switching from workspace {} to {}", old_idx, workspace_idx);
                     self.perform_workspace_switch(old_idx)?;
+                } else {
+                    log::info!("focus_urgent: already on correct workspace");
                 }
+
+                // For tiled windows, make sure the window's tab is focused before focusing
+                // This is needed because apply_layout only maps the focused tab in each frame
+                let frame_id = self.workspaces().current().layout.find_window(window);
+                log::info!("focus_urgent: find_window returned {:?}", frame_id);
+
+                if let Some(frame_id) = frame_id {
+                    // Find the index of this window in its frame
+                    let tab_idx = self.workspaces().current().layout.get(frame_id)
+                        .and_then(|n| n.as_frame())
+                        .and_then(|frame| frame.windows.iter().position(|&w| w == window));
+
+                    log::info!("focus_urgent: tab_idx is {:?}", tab_idx);
+
+                    if let Some(tab_idx) = tab_idx {
+                        log::info!("focus_urgent: switching to frame {:?} tab {} for window 0x{:x}", frame_id, tab_idx, window);
+                        // Use a single borrow to ensure focus_tab sees the updated layout.focused
+                        {
+                            let layout = &mut self.workspaces_mut().current_mut().layout;
+                            layout.focused = frame_id;
+                            layout.focus_tab(tab_idx);
+                        }
+                        // Re-apply layout to map the newly focused tab
+                        self.apply_layout()?;
+                    } else {
+                        log::warn!("focus_urgent: couldn't find tab index for window 0x{:x} in frame {:?}", window, frame_id);
+                    }
+                } else {
+                    log::info!("focus_urgent: window 0x{:x} is floating or not found in layout", window);
+                }
+
                 // Focus the window (which will clear its urgent state)
                 self.suppress_enter_focus = true;
                 self.focus_window(window)?;
+            } else {
+                log::warn!("focus_urgent: couldn't find workspace for window 0x{:x}", window);
             }
+        } else {
+            log::info!("focus_urgent: no urgent windows");
         }
         Ok(())
     }
@@ -2179,8 +2195,8 @@ impl Wm {
         self.icon_cache.remove(&window);
 
         // Remove from urgent list if present
-        if self.urgent_windows.contains(&window) {
-            self.urgent_windows.retain(|&w| w != window);
+        if self.urgent.contains(window) {
+            self.urgent.remove(window);
             self.update_urgent_indicator()?;
         }
 
@@ -2610,8 +2626,8 @@ impl Wm {
         self.focused_window = Some(window);
 
         // Clear urgent state if the window was urgent
-        if let Some(pos) = self.urgent_windows.iter().position(|&w| w == window) {
-            self.urgent_windows.remove(pos);
+        if self.urgent.contains(window) {
+            self.urgent.remove(window);
             log::info!("Cleared urgent state for window 0x{:x}", window);
             self.redraw_tabs_for_window(window)?;
             self.update_urgent_indicator()?;
@@ -2944,15 +2960,15 @@ impl Wm {
                 }
                 // Handle urgent state changes (EWMH _NET_WM_STATE or legacy WM_HINTS)
                 if e.atom == self.atoms.net_wm_state || e.atom == u32::from(AtomEnum::WM_HINTS) {
-                    let was_urgent = self.urgent_windows.contains(&e.window);
+                    let was_urgent = self.urgent.contains(e.window);
                     let is_urgent = window_query::is_window_urgent(&self.conn, &self.atoms, e.window);
                     if is_urgent && !was_urgent {
-                        self.urgent_windows.push(e.window); // Add to end (newest)
+                        self.urgent.add(e.window); // Add to end (newest)
                         log::info!("Window 0x{:x} is now urgent", e.window);
                         self.redraw_tabs_for_window(e.window)?;
                         self.update_urgent_indicator()?;
                     } else if !is_urgent && was_urgent {
-                        self.urgent_windows.retain(|&w| w != e.window);
+                        self.urgent.remove(e.window);
                         log::info!("Window 0x{:x} is no longer urgent", e.window);
                         self.redraw_tabs_for_window(e.window)?;
                         self.update_urgent_indicator()?;
@@ -4024,7 +4040,7 @@ impl Wm {
                 IpcResponse::Fullscreen { window: fullscreen }
             }
             IpcCommand::GetUrgent => {
-                let urgent: Vec<u32> = self.urgent_windows.iter().map(|&w| w as u32).collect();
+                let urgent: Vec<u32> = self.urgent.windows().iter().map(|&w| w as u32).collect();
                 IpcResponse::Urgent { windows: urgent }
             }
             IpcCommand::FocusUrgent => {
@@ -4271,7 +4287,7 @@ impl Wm {
                         is_visible: is_focused_tab, // Only the focused tab is visible
                         is_tagged: self.tagged_windows.contains(&window),
                         is_floating: false,
-                        is_urgent: self.urgent_windows.contains(&window),
+                        is_urgent: self.urgent.contains(window),
                     });
                 }
             }
@@ -4288,7 +4304,7 @@ impl Wm {
                 is_visible: true, // Floating windows are always visible
                 is_tagged: self.tagged_windows.contains(&fw.window),
                 is_floating: true,
-                is_urgent: self.urgent_windows.contains(&fw.window),
+                is_urgent: self.urgent.contains(fw.window),
             });
         }
 
