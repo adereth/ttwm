@@ -1,6 +1,9 @@
 //! Tab bar drawing primitives.
 //!
-//! Low-level X11 drawing functions for tab bar UI elements.
+//! Low-level X11 drawing functions for tab bar UI elements including:
+//! - Rounded rectangle shapes for tabs
+//! - Background fills and separators
+//! - Common drawing operations
 
 use anyhow::Result;
 use x11rb::connection::Connection;
@@ -159,5 +162,106 @@ pub fn draw_rounded_left_rect(
         }],
     )?;
 
+    Ok(())
+}
+
+/// Fill a drawable with a solid color rectangle.
+///
+/// This is a simple wrapper around poly_fill_rectangle for filling
+/// entire pixmaps or windows with a background color.
+/// Note: The GC foreground color must be set before calling this function.
+pub fn fill_solid(
+    conn: &impl Connection,
+    gc: Gcontext,
+    drawable: Drawable,
+    width: u16,
+    height: u16,
+) -> Result<()> {
+    conn.poly_fill_rectangle(
+        drawable,
+        gc,
+        &[Rectangle {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }],
+    )?;
+    Ok(())
+}
+
+/// Draw a vertical separator line (used between unfocused tabs).
+///
+/// Draws a 1-pixel wide vertical line at the specified position.
+/// Note: The GC foreground color must be set to the separator color before calling.
+pub fn draw_vertical_separator(
+    conn: &impl Connection,
+    gc: Gcontext,
+    drawable: Drawable,
+    x: i16,
+    y: i16,
+    height: u16,
+) -> Result<()> {
+    conn.poly_fill_rectangle(
+        drawable,
+        gc,
+        &[Rectangle {
+            x,
+            y,
+            width: 1,
+            height,
+        }],
+    )?;
+    Ok(())
+}
+
+/// Draw a horizontal separator line (used in vertical tab bars).
+///
+/// Draws a 1-pixel tall horizontal line at the specified position.
+/// Note: The GC foreground color must be set to the separator color before calling.
+pub fn draw_horizontal_separator(
+    conn: &impl Connection,
+    gc: Gcontext,
+    drawable: Drawable,
+    x: i16,
+    y: i16,
+    width: u16,
+) -> Result<()> {
+    conn.poly_segment(
+        drawable,
+        gc,
+        &[Segment {
+            x1: x,
+            y1: y,
+            x2: x + width as i16 - 1,
+            y2: y,
+        }],
+    )?;
+    Ok(())
+}
+
+/// Clear a rectangular area with a solid color.
+///
+/// Used to clear ghost tabs or empty areas in the tab bar.
+/// Note: The GC foreground color must be set to the background color before calling.
+pub fn clear_area(
+    conn: &impl Connection,
+    gc: Gcontext,
+    drawable: Drawable,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+) -> Result<()> {
+    conn.poly_fill_rectangle(
+        drawable,
+        gc,
+        &[Rectangle {
+            x,
+            y,
+            width,
+            height,
+        }],
+    )?;
     Ok(())
 }

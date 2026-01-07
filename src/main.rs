@@ -1111,20 +1111,14 @@ impl Wm {
         Some(reply.data)
     }
 
-    /// Draw the pseudo-transparent background for a tab bar.
-    fn draw_tab_bar_background(&mut self, pixmap: u32, rect: &Rect, pix_width: u16, pix_height: u16) -> Result<()> {
+    /// Draw the pseudo-transparent background for a tab bar (horizontal or vertical).
+    ///
+    /// Clears the pixmap with the tab bar background color, then samples the root
+    /// window at the tab bar position to create a pseudo-transparency effect.
+    fn draw_pixmap_background(&mut self, pixmap: u32, rect: &Rect, pix_width: u16, pix_height: u16) -> Result<()> {
         // Clear with solid color first to ensure old content is erased
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-        self.conn.poly_fill_rectangle(
-            pixmap,
-            self.gc,
-            &[Rectangle {
-                x: 0,
-                y: 0,
-                width: pix_width,
-                height: pix_height,
-            }],
-        )?;
+        tab_bar::fill_solid(&self.conn, self.gc, pixmap, pix_width, pix_height)?;
 
         // Sample and draw root background on top (pseudo-transparency)
         if let Some(pixels) = self.sample_root_background(
@@ -1141,44 +1135,6 @@ impl Wm {
                 pix_height,
                 0, 0,  // destination x, y
                 0,     // left_pad
-                self.screen_depth,
-                &pixels,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    /// Draw the background for a vertical tab bar.
-    fn draw_vertical_tab_bar_background(&mut self, pixmap: u32, rect: &Rect, pix_width: u16, pix_height: u16) -> Result<()> {
-        // Clear with solid color first
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-        self.conn.poly_fill_rectangle(
-            pixmap,
-            self.gc,
-            &[Rectangle {
-                x: 0,
-                y: 0,
-                width: pix_width,
-                height: pix_height,
-            }],
-        )?;
-
-        // Sample and draw root background on top (pseudo-transparency)
-        if let Some(pixels) = self.sample_root_background(
-            rect.x as i16,
-            rect.y as i16,
-            pix_width,
-            pix_height,
-        ) {
-            self.conn.put_image(
-                ImageFormat::Z_PIXMAP,
-                pixmap,
-                self.gc,
-                pix_width,
-                pix_height,
-                0, 0,
-                0,
                 self.screen_depth,
                 &pixels,
             )?;
@@ -1271,15 +1227,13 @@ impl Wm {
         // Draw separator line below (unless last tab or focused)
         if !is_last && !is_focused {
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
-            self.conn.poly_segment(
-                window,
+            tab_bar::draw_horizontal_separator(
+                &self.conn,
                 self.gc,
-                &[Segment {
-                    x1: corner_radius as i16,
-                    y1: y + height as i16 - 1,
-                    x2: (width - 1) as i16,
-                    y2: y + height as i16 - 1,
-                }],
+                window,
+                corner_radius as i16,
+                y + height as i16 - 1,
+                (width - corner_radius) as u16,
             )?;
         }
 
@@ -1394,15 +1348,13 @@ impl Wm {
         // Draw separator on right edge for unfocused tabs (except last)
         if !is_focused && !is_last {
             self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
-            self.conn.poly_fill_rectangle(
-                window,
+            tab_bar::draw_vertical_separator(
+                &self.conn,
                 self.gc,
-                &[Rectangle {
-                    x: x + tab_width as i16 - 1,
-                    y: 4,
-                    width: 1,
-                    height: (height - 8) as u16,
-                }],
+                window,
+                x + tab_width as i16 - 1,
+                4,
+                (height - 8) as u16,
             )?;
         }
 
@@ -1498,12 +1450,8 @@ impl Wm {
             (frame.windows.clone(), frame.focused, frame.windows.is_empty())
         };
 
-        // Draw background to pixmap
-        if vertical {
-            self.draw_vertical_tab_bar_background(pixmap, rect, pix_width, pix_height)?;
-        } else {
-            self.draw_tab_bar_background(pixmap, rect, pix_width, pix_height)?;
-        }
+        // Draw background to pixmap (same for horizontal and vertical)
+        self.draw_pixmap_background(pixmap, rect, pix_width, pix_height)?;
 
         // Empty frame - just copy the background pixmap
         if is_empty {
@@ -1542,16 +1490,7 @@ impl Wm {
             if (clear_start as u16) < pix_height {
                 self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
                 self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-                self.conn.poly_fill_rectangle(
-                    window,
-                    self.gc,
-                    &[Rectangle {
-                        x: 0,
-                        y: clear_start,
-                        width: pix_width,
-                        height: pix_height - clear_start as u16,
-                    }],
-                )?;
+                tab_bar::clear_area(&self.conn, self.gc, window, 0, clear_start, pix_width, pix_height - clear_start as u16)?;
                 return Ok(());
             }
         } else {
@@ -1587,16 +1526,7 @@ impl Wm {
                     self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
                     // Then clear the empty area on the WINDOW to remove ghost tabs
                     self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-                    self.conn.poly_fill_rectangle(
-                        window,
-                        self.gc,
-                        &[Rectangle {
-                            x: clear_start,
-                            y: 0,
-                            width: pix_width - clear_start as u16,
-                            height: pix_height,
-                        }],
-                    )?;
+                    tab_bar::clear_area(&self.conn, self.gc, window, clear_start, 0, pix_width - clear_start as u16, pix_height)?;
                     return Ok(());
                 }
             }
