@@ -4,6 +4,8 @@ A minimal X11 tiling window manager with tabbed windows, inspired by [Notion](ht
 
 ttwm combines the efficiency of tiling layouts with tabbed window organization. Multiple windows can share the same screen space as tabs within frames, and frames can be split horizontally or vertically to create complex layouts.
 
+![ttwm screenshot](docs/screenshot.png)
+
 ## Features
 
 - **Tabbed windows**: Stack multiple windows in a single frame, switch between them like browser tabs
