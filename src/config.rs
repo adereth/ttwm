@@ -2,10 +2,88 @@
 //!
 //! Loads settings from ~/.config/ttwm/config.toml if it exists,
 //! otherwise uses sensible defaults.
+//!
+//! Also provides `LayoutConfig` - the runtime configuration struct with
+//! resolved color values and layout parameters.
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+// =============================================================================
+// Runtime Configuration (resolved values)
+// =============================================================================
+
+/// Runtime layout configuration with resolved color values.
+///
+/// This struct holds the actual u32 color values and layout parameters
+/// used during rendering. It's constructed from the file-based config
+/// types at startup.
+#[derive(Debug, Clone)]
+pub struct LayoutConfig {
+    /// Gap between windows
+    pub gap: u32,
+    /// Outer gap (margin from screen edge)
+    pub outer_gap: u32,
+    /// Border width
+    pub border_width: u32,
+    /// Tab bar height (for horizontal tabs)
+    pub tab_bar_height: u32,
+    /// Vertical tab bar width (for vertical tabs)
+    pub vertical_tab_width: u32,
+    /// Tab bar background color
+    pub tab_bar_bg: u32,
+    /// Tab bar focused tab color
+    pub tab_focused_bg: u32,
+    /// Tab bar unfocused tab color
+    pub tab_unfocused_bg: u32,
+    /// Visible tab in unfocused frame color
+    pub tab_visible_unfocused_bg: u32,
+    /// Tagged tab background color
+    pub tab_tagged_bg: u32,
+    /// Urgent tab background color
+    pub tab_urgent_bg: u32,
+    /// Tab bar text color
+    pub tab_text_color: u32,
+    /// Tab bar text color for background tabs
+    pub tab_text_unfocused: u32,
+    /// Tab separator color
+    pub tab_separator: u32,
+    /// Border color for focused window
+    pub border_focused: u32,
+    /// Border color for unfocused window
+    pub border_unfocused: u32,
+    /// Show application icons in tabs
+    pub show_tab_icons: bool,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            gap: 8,
+            outer_gap: 8,
+            border_width: 2,
+            tab_bar_height: 28,
+            vertical_tab_width: 28,
+            tab_bar_bg: 0x000000,       // Black (fallback)
+            tab_focused_bg: 0x5294e2,   // Blue (matching border)
+            tab_unfocused_bg: 0x3a3a3a, // Darker gray
+            tab_visible_unfocused_bg: 0x4a6a9a, // Muted blue
+            tab_tagged_bg: 0xe06c75,    // Soft red
+            tab_urgent_bg: 0xd19a66,    // Orange/amber
+            tab_text_color: 0xffffff,   // White
+            tab_text_unfocused: 0x888888, // Dim gray
+            tab_separator: 0x4a4a4a,    // Subtle separator
+            border_focused: 0x5294e2,   // Blue
+            border_unfocused: 0x3a3a3a, // Gray
+            show_tab_icons: true,
+        }
+    }
+}
+
+// =============================================================================
+// File-based Configuration (TOML parsing)
+// =============================================================================
 
 /// Top-level configuration
 #[derive(Debug, Default, Deserialize)]

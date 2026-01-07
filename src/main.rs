@@ -36,73 +36,15 @@ use ipc::{IpcCommand, IpcResponse, IpcServer, WmStateSnapshot, WindowInfo};
 use layout::{Direction, NodeId, Rect, SplitDirection};
 use monitor::{MonitorId, MonitorManager};
 use workspaces::{WorkspaceManager, NUM_WORKSPACES};
-use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color, darken_color, DEFAULT_ICON};
+use render::{CachedIcon, FontRenderer, blend_icon_with_background, lighten_color, darken_color};
 use state::{StateTransition, UnmanageReason};
+use tab_bar::TabBarManager;
 use tracing::EventTracer;
 use types::StrutPartial;
 use urgent::UrgentManager;
 
-/// Layout configuration
-struct LayoutConfig {
-    /// Gap between windows
-    gap: u32,
-    /// Outer gap (margin from screen edge)
-    outer_gap: u32,
-    /// Border width
-    border_width: u32,
-    /// Tab bar height (for horizontal tabs)
-    tab_bar_height: u32,
-    /// Vertical tab bar width (for vertical tabs)
-    vertical_tab_width: u32,
-    /// Tab bar background color
-    tab_bar_bg: u32,
-    /// Tab bar focused tab color
-    tab_focused_bg: u32,
-    /// Tab bar unfocused tab color
-    tab_unfocused_bg: u32,
-    /// Visible tab in unfocused frame color
-    tab_visible_unfocused_bg: u32,
-    /// Tagged tab background color
-    tab_tagged_bg: u32,
-    /// Urgent tab background color
-    tab_urgent_bg: u32,
-    /// Tab bar text color
-    tab_text_color: u32,
-    /// Tab bar text color for background tabs
-    tab_text_unfocused: u32,
-    /// Tab separator color
-    tab_separator: u32,
-    /// Border color for focused window
-    border_focused: u32,
-    /// Border color for unfocused window
-    border_unfocused: u32,
-    /// Show application icons in tabs
-    show_tab_icons: bool,
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self {
-            gap: 8,
-            outer_gap: 8,
-            border_width: 2,
-            tab_bar_height: 28,
-            vertical_tab_width: 28,
-            tab_bar_bg: 0x000000,       // Black (fallback)
-            tab_focused_bg: 0x5294e2,   // Blue (matching border)
-            tab_unfocused_bg: 0x3a3a3a, // Darker gray
-            tab_visible_unfocused_bg: 0x4a6a9a, // Muted blue
-            tab_tagged_bg: 0xe06c75,    // Soft red
-            tab_urgent_bg: 0xd19a66,    // Orange/amber
-            tab_text_color: 0xffffff,   // White
-            tab_text_unfocused: 0x888888, // Dim gray
-            tab_separator: 0x4a4a4a,    // Subtle separator
-            border_focused: 0x5294e2,   // Blue
-            border_unfocused: 0x3a3a3a, // Gray
-            show_tab_icons: true,
-        }
-    }
-}
+// Re-export LayoutConfig from config module
+use config::LayoutConfig;
 
 /// Edge or corner of a floating window for resizing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,16 +123,10 @@ struct Wm {
     check_window: Window,
     /// Layout configuration
     config: LayoutConfig,
-    /// Tab bar windows for each frame ((monitor_id, workspace_idx, NodeId) -> Window)
-    tab_bar_windows: HashMap<(MonitorId, usize, NodeId), Window>,
-    /// Pixmap buffers for double-buffered tab bar rendering (tab_bar_window -> pixmap)
-    tab_bar_pixmaps: HashMap<Window, u32>,
-    /// Empty frame placeholder windows ((monitor_id, workspace_idx, NodeId) -> Window)
-    empty_frame_windows: HashMap<(MonitorId, usize, NodeId), Window>,
+    /// Tab bar manager (owns tab bar windows, pixmaps, empty frames, icons, font renderer)
+    tab_bars: TabBarManager,
     /// Windows we've intentionally unmapped (hidden tabs) - don't unmanage on UnmapNotify
     hidden_windows: std::collections::HashSet<Window>,
-    /// Graphics context for drawing
-    gc: Gcontext,
     /// Whether we should keep running
     running: bool,
     /// IPC server for external control
@@ -201,8 +137,6 @@ struct Wm {
     keybindings: HashMap<WmAction, ParsedBinding>,
     /// Current drag operation (if any)
     drag_state: Option<DragState>,
-    /// Font renderer for tab text
-    font_renderer: FontRenderer,
     /// Horizontal resize cursor
     cursor_resize_h: Cursor,
     /// Vertical resize cursor
@@ -219,10 +153,6 @@ struct Wm {
     cursor_resize_br: Cursor,
     /// Currently displayed cursor (to avoid redundant changes)
     current_cursor: Cursor,
-    /// Screen depth (for put_image)
-    screen_depth: u8,
-    /// Icon cache for tab icons (only caches windows that have icons)
-    icon_cache: HashMap<Window, CachedIcon>,
     /// Windows that are currently tagged for batch operations
     tagged_windows: std::collections::HashSet<Window>,
     /// Suppress EnterNotify focus changes (set after explicit focus operations)
@@ -437,17 +367,13 @@ impl Wm {
             focused_window: None,
             check_window,
             config,
-            tab_bar_windows: HashMap::new(),
-            tab_bar_pixmaps: HashMap::new(),
-            empty_frame_windows: HashMap::new(),
+            tab_bars: TabBarManager::new(font_renderer, gc, screen_depth),
             hidden_windows: std::collections::HashSet::new(),
-            gc,
             running: true,
             ipc,
             tracer: EventTracer::new(),
             keybindings,
             drag_state: None,
-            font_renderer,
             cursor_resize_h,
             cursor_resize_v,
             cursor_default,
@@ -456,8 +382,6 @@ impl Wm {
             cursor_resize_bl,
             cursor_resize_br,
             current_cursor: cursor_default,
-            screen_depth,
-            icon_cache: HashMap::new(),
             tagged_windows: std::collections::HashSet::new(),
             suppress_enter_focus: false,
             skip_focus_tab_bar_redraw: false,
@@ -788,14 +712,14 @@ impl Wm {
 
         // Hide tab bars from old workspace (on focused monitor)
         let mon_id = self.monitors.focused_id();
-        for (&(m_id, ws_idx, _), &tab_window) in &self.tab_bar_windows {
+        for (&(m_id, ws_idx, _), &tab_window) in &self.tab_bars.windows {
             if m_id == mon_id && ws_idx == old_idx {
                 self.conn.unmap_window(tab_window)?;
             }
         }
 
         // Hide empty frame windows from old workspace (on focused monitor)
-        for (&(m_id, ws_idx, _), &empty_window) in &self.empty_frame_windows {
+        for (&(m_id, ws_idx, _), &empty_window) in &self.tab_bars.empty_frame_windows {
             if m_id == mon_id && ws_idx == old_idx {
                 self.conn.unmap_window(empty_window)?;
             }
@@ -900,70 +824,12 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         let key = (mon_id, ws_idx, frame_id);
-
-        // Calculate dimensions based on orientation
-        let (x, y, width, height) = if vertical {
-            // Vertical: left side of frame, full height
-            (rect.x, rect.y, self.config.vertical_tab_width, rect.height)
-        } else {
-            // Horizontal: top of frame, full width
-            (rect.x, rect.y, rect.width, self.config.tab_bar_height)
-        };
-
-        if let Some(&window) = self.tab_bar_windows.get(&key) {
-            // Update position and size
-            self.conn.configure_window(
-                window,
-                &ConfigureWindowAux::new()
-                    .x(x)
-                    .y(y)
-                    .width(width)
-                    .height(height),
-            )?;
-            // Invalidate pixmap buffer (size may have changed)
-            if let Some(pixmap) = self.tab_bar_pixmaps.remove(&window) {
-                let _ = self.conn.free_pixmap(pixmap);
-            }
-            return Ok(window);
-        }
-
-        // Create new tab bar window
-        let window = self.conn.generate_id()?;
-        self.conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            window,
-            self.root,
-            x as i16,
-            y as i16,
-            width as u16,
-            height as u16,
-            0, // border width
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new()
-                .background_pixel(self.config.tab_bar_bg)
-                .event_mask(EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
-        )?;
-
-        self.conn.map_window(window)?;
-        self.tab_bar_windows.insert(key, window);
-
-        Ok(window)
+        self.tab_bars.get_or_create_window(&self.conn, self.root, &self.config, key, rect, vertical)
     }
 
     /// Get or create a pixmap buffer for double-buffered tab bar rendering
     fn get_or_create_tab_bar_pixmap(&mut self, window: Window, width: u16, height: u16) -> Result<u32> {
-        // Always free existing pixmap to ensure correct dimensions
-        // (pixmap might have been created with different dimensions)
-        if let Some(old_pixmap) = self.tab_bar_pixmaps.remove(&window) {
-            let _ = self.conn.free_pixmap(old_pixmap);
-        }
-
-        // Create new pixmap with requested dimensions
-        let pixmap = self.conn.generate_id()?;
-        self.conn.create_pixmap(self.screen_depth, pixmap, window, width, height)?;
-        self.tab_bar_pixmaps.insert(window, pixmap);
-        Ok(pixmap)
+        self.tab_bars.get_or_create_pixmap(&self.conn, window, width, height)
     }
 
     /// Get or create a placeholder window for an empty frame (shows border)
@@ -971,61 +837,7 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         let key = (mon_id, ws_idx, frame_id);
-
-        let border = self.config.border_width;
-        // Empty frames use the full rect (no tab bar)
-        let client_y = rect.y;
-        let client_height = rect.height;
-        let border_color = if is_focused {
-            self.config.border_focused
-        } else {
-            self.config.border_unfocused
-        };
-
-        if let Some(&window) = self.empty_frame_windows.get(&key) {
-            // Update position, size, and border color
-            self.conn.configure_window(
-                window,
-                &ConfigureWindowAux::new()
-                    .x(rect.x)
-                    .y(client_y)
-                    .width(rect.width.saturating_sub(border * 2))
-                    .height(client_height.saturating_sub(border * 2))
-                    .border_width(border),
-            )?;
-            self.conn.change_window_attributes(
-                window,
-                &ChangeWindowAttributesAux::new()
-                    .border_pixel(border_color),
-            )?;
-            // Re-map in case it was hidden (e.g., workspace switch)
-            self.conn.map_window(window)?;
-            return Ok(window);
-        }
-
-        // Create new empty frame placeholder window
-        let window = self.conn.generate_id()?;
-        self.conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            window,
-            self.root,
-            rect.x as i16,
-            client_y as i16,
-            (rect.width.saturating_sub(border * 2)) as u16,
-            (client_height.saturating_sub(border * 2)) as u16,
-            border as u16,
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new()
-                .background_pixel(self.config.tab_bar_bg)
-                .border_pixel(border_color)
-                .event_mask(EventMask::BUTTON_PRESS),
-        )?;
-
-        self.conn.map_window(window)?;
-        self.empty_frame_windows.insert(key, window);
-
-        Ok(window)
+        self.tab_bars.get_or_create_empty_frame(&self.conn, self.root, &self.config, key, rect, is_focused)
     }
 
     /// Destroy an empty frame placeholder window if it exists
@@ -1033,12 +845,7 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         let key = (mon_id, ws_idx, frame_id);
-
-        if let Some(window) = self.empty_frame_windows.remove(&key) {
-            if let Err(e) = self.conn.destroy_window(window) {
-                log::error!("Failed to destroy empty frame window: {}", e);
-            }
-        }
+        self.tab_bars.destroy_empty_frame(&self.conn, key);
     }
 
     /// Clean up empty frame windows for removed frames
@@ -1046,68 +853,23 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         let valid_frames: std::collections::HashSet<_> = self.workspaces().current().layout.all_frames().into_iter().collect();
-        let to_remove: Vec<_> = self.empty_frame_windows
-            .keys()
-            .filter(|(m_id, idx, frame_id)| *m_id == mon_id && *idx == ws_idx && !valid_frames.contains(frame_id))
-            .copied()
-            .collect();
-
-        for key in to_remove {
-            if let Some(window) = self.empty_frame_windows.remove(&key) {
-                if let Err(e) = self.conn.destroy_window(window) {
-                    log::error!("Failed to destroy empty frame window: {}", e);
-                }
-            }
-        }
+        self.tab_bars.cleanup_empty_frames(&self.conn, mon_id, ws_idx, &valid_frames);
     }
 
     /// Calculate tab widths based on window titles (Chrome-style content-based sizing)
     /// Returns a vector of (x_position, width) for each tab
     fn calculate_tab_layout(&self, frame_id: NodeId) -> Vec<(i16, u32)> {
-        const MIN_TAB_WIDTH: u32 = 80;
-        const MAX_TAB_WIDTH: u32 = 200;
-        const H_PADDING: u32 = 24;  // Total horizontal padding (12px each side)
-        const ICON_SIZE: u32 = 20;
-        const ICON_PADDING: u32 = 4;  // Padding after icon
-
         let frame = match self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
             Some(f) => f,
             None => return Vec::new(),
         };
-
-        // Extra width for icon when enabled
-        let icon_width = if self.config.show_tab_icons {
-            ICON_SIZE + ICON_PADDING
-        } else {
-            0
-        };
-
-        let mut result = Vec::new();
-        let mut x_offset: i16 = 0;
-
-        for &client_window in &frame.windows {
-            let title = window_query::get_window_title(&self.conn, &self.atoms, client_window);
-            let title_width = self.font_renderer.measure_text(&title);
-            let tab_width = (title_width + H_PADDING + icon_width).clamp(MIN_TAB_WIDTH + icon_width, MAX_TAB_WIDTH + icon_width);
-
-            result.push((x_offset, tab_width));
-            x_offset += tab_width as i16;
-        }
-
-        result
+        self.tab_bars.calculate_tab_layout(&self.conn, &self.atoms, &self.config, &frame.windows)
     }
 
     /// Sample the root window background at the given position
     /// Returns the pixel data that can be drawn with put_image
     fn sample_root_background(&self, x: i16, y: i16, width: u16, height: u16) -> Option<Vec<u8>> {
-        let reply = self.conn.get_image(
-            ImageFormat::Z_PIXMAP,
-            self.root,
-            x, y,
-            width, height,
-            !0,  // all planes
-        ).ok()?.reply().ok()?;
-        Some(reply.data)
+        TabBarManager::sample_root_background(&self.conn, self.root, x, y, width, height)
     }
 
     /// Draw the pseudo-transparent background for a tab bar (horizontal or vertical).
@@ -1116,8 +878,8 @@ impl Wm {
     /// window at the tab bar position to create a pseudo-transparency effect.
     fn draw_pixmap_background(&mut self, pixmap: u32, rect: &Rect, pix_width: u16, pix_height: u16) -> Result<()> {
         // Clear with solid color first to ensure old content is erased
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-        tab_bar::fill_solid(&self.conn, self.gc, pixmap, pix_width, pix_height)?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+        tab_bar::fill_solid(&self.conn, self.tab_bars.gc, pixmap, pix_width, pix_height)?;
 
         // Sample and draw root background on top (pseudo-transparency)
         if let Some(pixels) = self.sample_root_background(
@@ -1129,12 +891,12 @@ impl Wm {
             self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
                 pixmap,
-                self.gc,
+                self.tab_bars.gc,
                 pix_width,
                 pix_height,
                 0, 0,  // destination x, y
                 0,     // left_pad
-                self.screen_depth,
+                self.tab_bars.screen_depth,
                 &pixels,
             )?;
         }
@@ -1176,10 +938,10 @@ impl Wm {
         // Draw drop shadow for focused tabs (before tab background so it appears behind)
         if is_focused {
             let shadow_color = darken_color(bg_color, 0.3);
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(shadow_color))?;
+            self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(shadow_color))?;
             self.conn.poly_fill_rectangle(
                 window,
-                self.gc,
+                self.tab_bars.gc,
                 &[Rectangle {
                     x: 2,
                     y: y + 2,
@@ -1190,18 +952,18 @@ impl Wm {
         }
 
         // Draw tab background with rounded left corners
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
-        tab_bar::draw_rounded_left_rect(&self.conn, self.gc, window, 0, y, width, height, corner_radius)?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(bg_color))?;
+        tab_bar::draw_rounded_left_rect(&self.conn, self.tab_bars.gc, window, 0, y, width, height, corner_radius)?;
 
         // Draw bevel effect for 3D raised appearance
         let bevel_light = lighten_color(bg_color, 0x20);
         let bevel_dark = darken_color(bg_color, 0.7);
 
         // Left highlight (inside rounded corners)
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_light))?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(bevel_light))?;
         self.conn.poly_fill_rectangle(
             window,
-            self.gc,
+            self.tab_bars.gc,
             &[Rectangle {
                 x: 1,
                 y: y + corner_radius as i16,
@@ -1211,10 +973,10 @@ impl Wm {
         )?;
 
         // Right shadow line
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
         self.conn.poly_fill_rectangle(
             window,
-            self.gc,
+            self.tab_bars.gc,
             &[Rectangle {
                 x: (width - 1) as i16,
                 y,
@@ -1225,10 +987,10 @@ impl Wm {
 
         // Draw separator line below (unless last tab or focused)
         if !is_last && !is_focused {
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
+            self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
             tab_bar::draw_horizontal_separator(
                 &self.conn,
-                self.gc,
+                self.tab_bars.gc,
                 window,
                 corner_radius as i16,
                 y + height as i16 - 1,
@@ -1246,7 +1008,7 @@ impl Wm {
         self.conn.put_image(
             ImageFormat::Z_PIXMAP,
             window,
-            self.gc,
+            self.tab_bars.gc,
             ICON_SIZE as u16,
             ICON_SIZE as u16,
             icon_x,
@@ -1297,10 +1059,10 @@ impl Wm {
         // Draw drop shadow for focused tabs (before tab background so it appears behind)
         if is_focused {
             let shadow_color = darken_color(bg_color, 0.3);
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(shadow_color))?;
+            self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(shadow_color))?;
             self.conn.poly_fill_rectangle(
                 window,
-                self.gc,
+                self.tab_bars.gc,
                 &[Rectangle {
                     x: x + 2,
                     y: (height - 2) as i16,
@@ -1311,18 +1073,18 @@ impl Wm {
         }
 
         // Draw tab background with rounded top corners
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
-        tab_bar::draw_rounded_top_rect(&self.conn, self.gc, window, x, 0, tab_width, height, corner_radius)?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(bg_color))?;
+        tab_bar::draw_rounded_top_rect(&self.conn, self.tab_bars.gc, window, x, 0, tab_width, height, corner_radius)?;
 
         // Draw bevel effect for 3D raised appearance
         let bevel_light = lighten_color(bg_color, 0x20);
         let bevel_dark = darken_color(bg_color, 0.7);
 
         // Top highlight (inside rounded corners)
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_light))?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(bevel_light))?;
         self.conn.poly_fill_rectangle(
             window,
-            self.gc,
+            self.tab_bars.gc,
             &[Rectangle {
                 x: x + corner_radius as i16,
                 y: 1,
@@ -1332,10 +1094,10 @@ impl Wm {
         )?;
 
         // Bottom shadow line
-        self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
+        self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(bevel_dark))?;
         self.conn.poly_fill_rectangle(
             window,
-            self.gc,
+            self.tab_bars.gc,
             &[Rectangle {
                 x: x,
                 y: (height - 1) as i16,
@@ -1346,10 +1108,10 @@ impl Wm {
 
         // Draw separator on right edge for unfocused tabs (except last)
         if !is_focused && !is_last {
-            self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
+            self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(self.config.tab_separator))?;
             tab_bar::draw_vertical_separator(
                 &self.conn,
-                self.gc,
+                self.tab_bars.gc,
                 window,
                 x + tab_width as i16 - 1,
                 4,
@@ -1372,7 +1134,7 @@ impl Wm {
             self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
                 window,
-                self.gc,
+                self.tab_bars.gc,
                 icon_size as u16,
                 icon_size as u16,
                 icon_x,
@@ -1388,7 +1150,7 @@ impl Wm {
         // Get window title and truncate if needed
         let title = window_query::get_window_title(&self.conn, &self.atoms, client_window);
         let available_width = (tab_width as i32 - h_padding as i32 * 2 - content_offset as i32).max(0) as u32;
-        let display_title = self.font_renderer.truncate_text_to_width(&title, available_width);
+        let display_title = self.tab_bars.font_renderer.truncate_text_to_width(&title, available_width);
 
         // Text color (dimmer for background tabs)
         let text_color = if is_focused {
@@ -1398,7 +1160,7 @@ impl Wm {
         };
 
         // Render text with FreeType
-        let (pixels, text_width, text_height) = self.font_renderer.render_text(
+        let (pixels, text_width, text_height) = self.tab_bars.font_renderer.render_text(
             &display_title,
             text_color,
             bg_color,
@@ -1413,7 +1175,7 @@ impl Wm {
             self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
                 window,
-                self.gc,
+                self.tab_bars.gc,
                 text_width as u16,
                 text_height as u16,
                 text_x,
@@ -1454,7 +1216,7 @@ impl Wm {
 
         // Empty frame - just copy the background pixmap
         if is_empty {
-            self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
+            self.conn.copy_area(pixmap, window, self.tab_bars.gc, 0, 0, 0, 0, pix_width, pix_height)?;
             return Ok(());
         }
 
@@ -1487,9 +1249,9 @@ impl Wm {
             // Clear area after last tab on the WINDOW to remove ghost tabs
             let clear_start = (num_tabs as u32 * tab_size) as i16;
             if (clear_start as u16) < pix_height {
-                self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
-                self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-                tab_bar::clear_area(&self.conn, self.gc, window, 0, clear_start, pix_width, pix_height - clear_start as u16)?;
+                self.conn.copy_area(pixmap, window, self.tab_bars.gc, 0, 0, 0, 0, pix_width, pix_height)?;
+                self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+                tab_bar::clear_area(&self.conn, self.tab_bars.gc, window, 0, clear_start, pix_width, pix_height - clear_start as u16)?;
                 return Ok(());
             }
         } else {
@@ -1522,17 +1284,17 @@ impl Wm {
                 let clear_start = last_x + last_width as i16;
                 if (clear_start as u16) < pix_width {
                     // Copy pixmap to window first
-                    self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
+                    self.conn.copy_area(pixmap, window, self.tab_bars.gc, 0, 0, 0, 0, pix_width, pix_height)?;
                     // Then clear the empty area on the WINDOW to remove ghost tabs
-                    self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
-                    tab_bar::clear_area(&self.conn, self.gc, window, clear_start, 0, pix_width - clear_start as u16, pix_height)?;
+                    self.conn.change_gc(self.tab_bars.gc, &ChangeGCAux::new().foreground(self.config.tab_bar_bg))?;
+                    tab_bar::clear_area(&self.conn, self.tab_bars.gc, window, clear_start, 0, pix_width - clear_start as u16, pix_height)?;
                     return Ok(());
                 }
             }
         }
 
         // Copy the rendered pixmap to window (double buffering)
-        self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
+        self.conn.copy_area(pixmap, window, self.tab_bars.gc, 0, 0, 0, 0, pix_width, pix_height)?;
 
         Ok(())
     }
@@ -1540,21 +1302,7 @@ impl Wm {
     /// Get window icon from _NET_WM_ICON property, scaled to 20x20 BGRA.
     /// Returns a static default icon if the window has no icon.
     fn get_window_icon(&mut self, window: Window) -> &CachedIcon {
-        const ICON_SIZE: u32 = 20;
-
-        // Check cache first
-        if self.icon_cache.contains_key(&window) {
-            return self.icon_cache.get(&window).unwrap();
-        }
-
-        // Try to fetch _NET_WM_ICON - only cache if we get an actual icon
-        if let Some(icon) = icon::fetch_icon(&self.conn, &self.atoms, window, ICON_SIZE) {
-            self.icon_cache.insert(window, icon);
-            return self.icon_cache.get(&window).unwrap();
-        }
-
-        // Return default icon for windows without _NET_WM_ICON
-        &DEFAULT_ICON
+        self.tab_bars.get_icon(&self.conn, &self.atoms, window)
     }
 
     /// Redraw tab bars that contain a specific window (used when icon changes)
@@ -1571,7 +1319,7 @@ impl Wm {
                 .unwrap_or(false);
 
             // Get tab bar window for this frame
-            if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
+            if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, frame_id)) {
                 // Get frame geometry
                 let screen_rect = self.usable_screen();
                 let geometries = self.workspaces().current().layout.calculate_geometries(
@@ -1594,23 +1342,7 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         let valid_frames: std::collections::HashSet<_> = self.workspaces().current().layout.all_frames().into_iter().collect();
-        let to_remove: Vec<_> = self.tab_bar_windows
-            .keys()
-            .filter(|(m_id, idx, frame_id)| *m_id == mon_id && *idx == ws_idx && !valid_frames.contains(frame_id))
-            .copied()
-            .collect();
-
-        for key in to_remove {
-            if let Some(window) = self.tab_bar_windows.remove(&key) {
-                // Free associated pixmap buffer
-                if let Some(pixmap) = self.tab_bar_pixmaps.remove(&window) {
-                    let _ = self.conn.free_pixmap(pixmap);
-                }
-                if let Err(e) = self.conn.destroy_window(window) {
-                    log::error!("Failed to destroy tab bar window: {}", e);
-                }
-            }
-        }
+        self.tab_bars.cleanup(&self.conn, mon_id, ws_idx, &valid_frames);
     }
 
     /// Apply the current layout to all windows
@@ -1638,12 +1370,12 @@ impl Wm {
             // Hide all tab bars and empty frame placeholders
             let mon_id = self.monitors.focused_id();
             let ws_idx = self.workspaces().current_index();
-            for (&(mid, wsidx, _), &tab_win) in &self.tab_bar_windows {
+            for (&(mid, wsidx, _), &tab_win) in &self.tab_bars.windows {
                 if mid == mon_id && wsidx == ws_idx {
                     self.conn.unmap_window(tab_win)?;
                 }
             }
-            for (&(mid, wsidx, _), &empty_win) in &self.empty_frame_windows {
+            for (&(mid, wsidx, _), &empty_win) in &self.tab_bars.empty_frame_windows {
                 if mid == mon_id && wsidx == ws_idx {
                     self.conn.unmap_window(empty_win)?;
                 }
@@ -1724,7 +1456,7 @@ impl Wm {
                 // Hide tab bar for single-window frames
                 let mon_id = self.monitors.focused_id();
                 let ws_idx = self.workspaces().current_index();
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, fd.frame_id)) {
+                if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, fd.frame_id)) {
                     self.conn.unmap_window(tab_window)?;
                 }
             }
@@ -1992,7 +1724,7 @@ impl Wm {
 
         // Show and draw the indicator
         if let Some(window) = self.urgent.indicator() {
-            urgent::show_indicator(&self.conn, self.gc, window, self.config.tab_urgent_bg)?;
+            urgent::show_indicator(&self.conn, self.tab_bars.gc, window, self.config.tab_urgent_bg)?;
         }
         Ok(())
     }
@@ -2192,7 +1924,7 @@ impl Wm {
         self.tagged_windows.remove(&window);
 
         // Remove from icon cache to prevent stale icons when X11 reuses window IDs
-        self.icon_cache.remove(&window);
+        self.tab_bars.invalidate_icon(window);
 
         // Remove from urgent list if present
         if self.urgent.contains(window) {
@@ -2501,7 +2233,7 @@ impl Wm {
                 let mon_id = self.monitors.focused_id();
                 let ws_idx = self.workspaces().current_index();
 
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
+                if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&old_focused_frame) {
                         let vertical = self.workspaces().current().layout.get(old_focused_frame)
                             .and_then(|n| n.as_frame())
@@ -2510,7 +2242,7 @@ impl Wm {
                         self.draw_tab_bar(old_focused_frame, tab_window, rect, vertical)?;
                     }
                 }
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, new_focused_frame)) {
+                if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, new_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&new_focused_frame) {
                         let vertical = self.workspaces().current().layout.get(new_focused_frame)
                             .and_then(|n| n.as_frame())
@@ -2521,14 +2253,14 @@ impl Wm {
                 }
 
                 // Update empty frame window borders
-                if let Some(&empty_window) = self.empty_frame_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
+                if let Some(&empty_window) = self.tab_bars.empty_frame_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     self.conn.change_window_attributes(
                         empty_window,
                         &ChangeWindowAttributesAux::new()
                             .border_pixel(self.config.border_unfocused),
                     )?;
                 }
-                if let Some(&empty_window) = self.empty_frame_windows.get(&(mon_id, ws_idx, new_focused_frame)) {
+                if let Some(&empty_window) = self.tab_bars.empty_frame_windows.get(&(mon_id, ws_idx, new_focused_frame)) {
                     self.conn.change_window_attributes(
                         empty_window,
                         &ChangeWindowAttributesAux::new()
@@ -2657,7 +2389,7 @@ impl Wm {
             let ws_idx = self.workspaces().current_index();
 
             // Re-raise the tab bar if this frame has one (so it stays above the window)
-            if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
+            if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, frame_id)) {
                 self.conn.configure_window(
                     tab_window,
                     &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
@@ -2671,7 +2403,7 @@ impl Wm {
 
             // Redraw old focused frame's tab bar if it changed
             if old_focused_frame != frame_id {
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, old_focused_frame)) {
+                if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, old_focused_frame)) {
                     if let Some(rect) = geometry_map.get(&old_focused_frame) {
                         let vertical = self.workspaces().current().layout.get(old_focused_frame)
                             .and_then(|n| n.as_frame())
@@ -2684,7 +2416,7 @@ impl Wm {
 
             // Redraw current frame's tab bar (unless apply_layout() just did it)
             if !self.skip_focus_tab_bar_redraw {
-                if let Some(&tab_window) = self.tab_bar_windows.get(&(mon_id, ws_idx, frame_id)) {
+                if let Some(&tab_window) = self.tab_bars.windows.get(&(mon_id, ws_idx, frame_id)) {
                     if let Some(rect) = geometry_map.get(&frame_id) {
                         let vertical = self.workspaces().current().layout.get(frame_id)
                             .and_then(|n| n.as_frame())
@@ -2950,7 +2682,7 @@ impl Wm {
                 self.tracer.trace_x11_event("PropertyNotify", Some(e.window), &format!("atom={}", e.atom));
                 // Invalidate icon cache if _NET_WM_ICON changed
                 if e.atom == self.atoms.net_wm_icon {
-                    self.icon_cache.remove(&e.window);
+                    self.tab_bars.invalidate_icon(e.window);
                     // Redraw tab bars that might show this window
                     self.redraw_tabs_for_window(e.window)?;
                 }
@@ -3120,7 +2852,7 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         // Find which frame this tab bar belongs to
-        for (&(m, idx, frame_id), &tab_window) in &self.tab_bar_windows {
+        for (&(m, idx, frame_id), &tab_window) in &self.tab_bars.windows {
             if m == mon_id && idx == ws_idx && tab_window == event.window {
                 // Get vertical_tabs state
                 let vertical = self.workspaces().current().layout.get(frame_id)
@@ -3228,8 +2960,8 @@ impl Wm {
             if let Some(frame) = self.workspaces().current().layout.get(frame_id).and_then(|n| n.as_frame()) {
                 if frame.is_empty() {
                     // Remove tab bar window and its pixmap buffer
-                    if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
-                        if let Some(pixmap) = self.tab_bar_pixmaps.remove(&tab_window) {
+                    if let Some(tab_window) = self.tab_bars.windows.remove(&(mon_id, ws_idx, frame_id)) {
+                        if let Some(pixmap) = self.tab_bars.pixmaps.remove(&tab_window) {
                             let _ = self.conn.free_pixmap(pixmap);
                         }
                         self.conn.destroy_window(tab_window)?;
@@ -3336,18 +3068,18 @@ impl Wm {
         let ws_idx = self.workspaces().current_index();
 
         // Check for click on an empty frame window (content area)
-        let clicked_empty_frame = self.empty_frame_windows.iter()
+        let clicked_empty_frame = self.tab_bars.empty_frame_windows.iter()
             .find(|(&(m, idx, _), &empty_window)| m == mon_id && idx == ws_idx && empty_window == event.event)
             .map(|(&(_, _, frame_id), _)| frame_id);
 
         if let Some(frame_id) = clicked_empty_frame {
             if event.detail == 2 {
                 // Middle-click: remove empty frame
-                if let Some(empty_window) = self.empty_frame_windows.remove(&(mon_id, ws_idx, frame_id)) {
+                if let Some(empty_window) = self.tab_bars.empty_frame_windows.remove(&(mon_id, ws_idx, frame_id)) {
                     self.conn.destroy_window(empty_window)?;
                 }
-                if let Some(tab_window) = self.tab_bar_windows.remove(&(mon_id, ws_idx, frame_id)) {
-                    if let Some(pixmap) = self.tab_bar_pixmaps.remove(&tab_window) {
+                if let Some(tab_window) = self.tab_bars.windows.remove(&(mon_id, ws_idx, frame_id)) {
+                    if let Some(pixmap) = self.tab_bars.pixmaps.remove(&tab_window) {
                         let _ = self.conn.free_pixmap(pixmap);
                     }
                     self.conn.destroy_window(tab_window)?;
@@ -3365,7 +3097,7 @@ impl Wm {
         }
 
         // Find which frame's tab bar was clicked
-        let clicked_frame = self.tab_bar_windows.iter()
+        let clicked_frame = self.tab_bars.windows.iter()
             .find(|(&(m, idx, _), &tab_window)| m == mon_id && idx == ws_idx && tab_window == event.event)
             .map(|(&(_, _, frame_id), _)| frame_id);
 
@@ -3482,7 +3214,7 @@ impl Wm {
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
         // Check each tab bar window first (higher priority than content area)
-        for (&(m, idx, frame_id), &tab_window) in &self.tab_bar_windows {
+        for (&(m, idx, frame_id), &tab_window) in &self.tab_bars.windows {
             if m != mon_id || idx != ws_idx {
                 continue;
             }
@@ -4339,7 +4071,7 @@ impl Wm {
         // Check: tab bar windows should correspond to existing frames
         let mon_id = self.monitors.focused_id();
         let ws_idx = self.workspaces().current_index();
-        for &(m, idx, frame_id) in self.tab_bar_windows.keys() {
+        for &(m, idx, frame_id) in self.tab_bars.windows.keys() {
             if m == mon_id && idx == ws_idx && self.workspaces().current().layout.get(frame_id).is_none() {
                 violations.push(format!("Tab bar for non-existent frame {:?}", frame_id));
             }
