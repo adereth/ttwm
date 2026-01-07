@@ -660,27 +660,17 @@ impl Wm {
 
     /// Update _NET_CURRENT_DESKTOP
     fn update_current_desktop(&self) -> Result<()> {
-        self.conn.change_property32(
-            PropMode::REPLACE,
+        ewmh::update_current_desktop(
+            &self.conn,
+            &self.atoms,
             self.root,
-            self.atoms.net_current_desktop,
-            AtomEnum::CARDINAL,
-            &[self.workspaces().current_index() as u32],
-        )?;
-        self.conn.flush()?;
-        Ok(())
+            self.workspaces().current_index(),
+        )
     }
 
     /// Set _NET_WM_DESKTOP for a window
     fn set_window_desktop(&self, window: Window, desktop: usize) -> Result<()> {
-        self.conn.change_property32(
-            PropMode::REPLACE,
-            window,
-            self.atoms.net_wm_desktop,
-            AtomEnum::CARDINAL,
-            &[desktop as u32],
-        )?;
-        Ok(())
+        ewmh::set_window_desktop(&self.conn, &self.atoms, window, desktop)
     }
 
     /// Switch to the next workspace
@@ -863,27 +853,12 @@ impl Wm {
         for ws in &self.monitors.focused().workspaces.workspaces {
             windows.extend(ws.floating_window_ids());
         }
-        self.conn.change_property32(
-            PropMode::REPLACE,
-            self.root,
-            self.atoms.net_client_list,
-            AtomEnum::WINDOW,
-            &windows,
-        )?;
-        Ok(())
+        ewmh::update_client_list(&self.conn, &self.atoms, self.root, &windows)
     }
 
     /// Update _NET_ACTIVE_WINDOW
     fn update_active_window(&self) -> Result<()> {
-        let active = self.focused_window.unwrap_or(0);
-        self.conn.change_property32(
-            PropMode::REPLACE,
-            self.root,
-            self.atoms.net_active_window,
-            AtomEnum::WINDOW,
-            &[active],
-        )?;
-        Ok(())
+        ewmh::update_active_window(&self.conn, &self.atoms, self.root, self.focused_window)
     }
 
     /// Get the usable screen area for the focused monitor (with outer gaps)
@@ -2453,43 +2428,7 @@ impl Wm {
 
     /// Update _NET_WM_STATE property for fullscreen
     fn update_wm_state(&self, window: Window, fullscreen: bool) -> Result<()> {
-        // Read current state
-        let current_states = self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_state,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        )?.reply()?;
-
-        let mut states: Vec<u32> = current_states.value32()
-            .map(|iter| iter.collect())
-            .unwrap_or_default();
-
-        let fullscreen_atom = self.atoms.net_wm_state_fullscreen;
-
-        if fullscreen {
-            // Add fullscreen state if not present
-            if !states.contains(&fullscreen_atom) {
-                states.push(fullscreen_atom);
-            }
-        } else {
-            // Remove fullscreen state
-            states.retain(|&s| s != fullscreen_atom);
-        }
-
-        // Write back the state
-        self.conn.change_property32(
-            PropMode::REPLACE,
-            window,
-            self.atoms.net_wm_state,
-            AtomEnum::ATOM,
-            &states,
-        )?;
-        self.conn.flush()?;
-
-        Ok(())
+        ewmh::update_wm_state_fullscreen(&self.conn, &self.atoms, window, fullscreen)
     }
 
     /// Toggle vertical tabs on the focused frame

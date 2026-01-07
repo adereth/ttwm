@@ -1,11 +1,14 @@
-//! EWMH (Extended Window Manager Hints) atom management.
+//! EWMH (Extended Window Manager Hints) atom management and property updates.
 //!
 //! This module provides the X11 atoms required for EWMH compliance,
 //! enabling proper integration with desktop environments and pagers.
+//! Also includes helper functions for updating EWMH properties.
 
 use anyhow::Result;
-use x11rb::protocol::xproto::{Atom, ConnectionExt};
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt, PropMode, Window};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
 /// EWMH and ICCCM atoms used by the window manager
 #[allow(dead_code)]
@@ -98,4 +101,123 @@ impl Atoms {
     fn intern(conn: &RustConnection, name: &[u8]) -> Result<Atom> {
         Ok(conn.intern_atom(false, name)?.reply()?.atom)
     }
+}
+
+// =============================================================================
+// EWMH Property Update Functions
+// =============================================================================
+
+/// Set _NET_WM_DESKTOP property for a window.
+pub fn set_window_desktop(
+    conn: &impl Connection,
+    atoms: &Atoms,
+    window: Window,
+    desktop: usize,
+) -> Result<()> {
+    conn.change_property32(
+        PropMode::REPLACE,
+        window,
+        atoms.net_wm_desktop,
+        AtomEnum::CARDINAL,
+        &[desktop as u32],
+    )?;
+    Ok(())
+}
+
+/// Update _NET_CURRENT_DESKTOP property on root window.
+pub fn update_current_desktop(
+    conn: &impl Connection,
+    atoms: &Atoms,
+    root: Window,
+    desktop: usize,
+) -> Result<()> {
+    conn.change_property32(
+        PropMode::REPLACE,
+        root,
+        atoms.net_current_desktop,
+        AtomEnum::CARDINAL,
+        &[desktop as u32],
+    )?;
+    conn.flush()?;
+    Ok(())
+}
+
+/// Update _NET_ACTIVE_WINDOW property on root window.
+pub fn update_active_window(
+    conn: &impl Connection,
+    atoms: &Atoms,
+    root: Window,
+    active: Option<Window>,
+) -> Result<()> {
+    conn.change_property32(
+        PropMode::REPLACE,
+        root,
+        atoms.net_active_window,
+        AtomEnum::WINDOW,
+        &[active.unwrap_or(0)],
+    )?;
+    Ok(())
+}
+
+/// Update _NET_CLIENT_LIST property on root window.
+pub fn update_client_list(
+    conn: &impl Connection,
+    atoms: &Atoms,
+    root: Window,
+    windows: &[Window],
+) -> Result<()> {
+    conn.change_property32(
+        PropMode::REPLACE,
+        root,
+        atoms.net_client_list,
+        AtomEnum::WINDOW,
+        windows,
+    )?;
+    Ok(())
+}
+
+/// Update _NET_WM_STATE property for fullscreen state.
+pub fn update_wm_state_fullscreen(
+    conn: &impl Connection,
+    atoms: &Atoms,
+    window: Window,
+    fullscreen: bool,
+) -> Result<()> {
+    // Read current state
+    let current_states = conn.get_property(
+        false,
+        window,
+        atoms.net_wm_state,
+        AtomEnum::ATOM,
+        0,
+        1024,
+    )?.reply()?;
+
+    let mut states: Vec<u32> = current_states.value32()
+        .map(|iter| iter.collect())
+        .unwrap_or_default();
+
+    let fullscreen_atom = atoms.net_wm_state_fullscreen;
+
+    if fullscreen {
+        // Add fullscreen state if not present
+        if !states.contains(&fullscreen_atom) {
+            states.push(fullscreen_atom);
+        }
+    } else {
+        // Remove fullscreen state
+        states.retain(|&s| s != fullscreen_atom);
+    }
+
+    // Write back the state
+    conn.change_property32(
+        PropMode::REPLACE,
+        window,
+        atoms.net_wm_state,
+        AtomEnum::ATOM,
+        &states,
+    )?;
+    conn.flush()?;
+
+    Ok(())
 }
