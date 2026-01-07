@@ -13,6 +13,7 @@ mod monitor;
 mod render;
 mod startup;
 mod state;
+mod tab_bar;
 mod tracing;
 mod types;
 mod window_query;
@@ -1122,155 +1123,6 @@ impl Wm {
         result
     }
 
-    /// Draw a filled rectangle with rounded top corners
-    fn draw_rounded_top_rect(
-        &self,
-        window: Window,
-        x: i16,
-        y: i16,
-        width: u32,
-        height: u32,
-        radius: u32,
-    ) -> Result<()> {
-        let r = radius.min(width / 2).min(height / 2) as i16;
-        let w = width as i16;
-        let h = height as i16;
-
-        // Draw the main body (below the rounded corners)
-        self.conn.poly_fill_rectangle(
-            window,
-            self.gc,
-            &[Rectangle {
-                x,
-                y: y + r,
-                width: width as u16,
-                height: (h - r) as u16,
-            }],
-        )?;
-
-        // Draw the top middle section (between the two corners)
-        if w > 2 * r {
-            self.conn.poly_fill_rectangle(
-                window,
-                self.gc,
-                &[Rectangle {
-                    x: x + r,
-                    y,
-                    width: (w - 2 * r) as u16,
-                    height: r as u16,
-                }],
-            )?;
-        }
-
-        // Draw top-left corner arc (quarter circle)
-        // Arc angles are in 1/64th of a degree, starting from 3 o'clock going counterclockwise
-        // Top-left: start at 90°, sweep 90° counterclockwise
-        self.conn.poly_fill_arc(
-            window,
-            self.gc,
-            &[Arc {
-                x,
-                y,
-                width: (2 * r) as u16,
-                height: (2 * r) as u16,
-                angle1: 90 * 64,  // Start at 12 o'clock
-                angle2: 90 * 64,  // Sweep 90° counterclockwise to 9 o'clock
-            }],
-        )?;
-
-        // Draw top-right corner arc
-        // Top-right: start at 0°, sweep 90° counterclockwise
-        self.conn.poly_fill_arc(
-            window,
-            self.gc,
-            &[Arc {
-                x: x + w - 2 * r,
-                y,
-                width: (2 * r) as u16,
-                height: (2 * r) as u16,
-                angle1: 0,        // Start at 3 o'clock
-                angle2: 90 * 64,  // Sweep 90° counterclockwise to 12 o'clock
-            }],
-        )?;
-
-        Ok(())
-    }
-
-    /// Draw a filled rectangle with rounded corners on the left side only.
-    /// Used for vertical tabs (left edge of frame).
-    fn draw_rounded_left_rect(
-        &self,
-        window: Window,
-        x: i16,
-        y: i16,
-        width: u32,
-        height: u32,
-        radius: u32,
-    ) -> Result<()> {
-        let r = radius.min(width / 2).min(height / 2) as i16;
-        let w = width as i16;
-        let h = height as i16;
-
-        // Draw the main body (to the right of the rounded corners)
-        self.conn.poly_fill_rectangle(
-            window,
-            self.gc,
-            &[Rectangle {
-                x: x + r,
-                y,
-                width: (w - r) as u16,
-                height: height as u16,
-            }],
-        )?;
-
-        // Draw the left middle section (between the two corners)
-        if h > 2 * r {
-            self.conn.poly_fill_rectangle(
-                window,
-                self.gc,
-                &[Rectangle {
-                    x,
-                    y: y + r,
-                    width: r as u16,
-                    height: (h - 2 * r) as u16,
-                }],
-            )?;
-        }
-
-        // Draw top-left corner arc (quarter circle)
-        // Arc angles are in 1/64th of a degree, starting from 3 o'clock going counterclockwise
-        // Top-left: start at 90°, sweep 90° counterclockwise to 180°
-        self.conn.poly_fill_arc(
-            window,
-            self.gc,
-            &[Arc {
-                x,
-                y,
-                width: (2 * r) as u16,
-                height: (2 * r) as u16,
-                angle1: 90 * 64,  // Start at 12 o'clock
-                angle2: 90 * 64,  // Sweep 90° counterclockwise to 9 o'clock
-            }],
-        )?;
-
-        // Draw bottom-left corner arc
-        // Bottom-left: start at 180°, sweep 90° counterclockwise to 270°
-        self.conn.poly_fill_arc(
-            window,
-            self.gc,
-            &[Arc {
-                x,
-                y: y + h - 2 * r,
-                width: (2 * r) as u16,
-                height: (2 * r) as u16,
-                angle1: 180 * 64, // Start at 9 o'clock
-                angle2: 90 * 64,  // Sweep 90° counterclockwise to 6 o'clock
-            }],
-        )?;
-
-        Ok(())
-    }
-
     /// Sample the root window background at the given position
     /// Returns the pixel data that can be drawn with put_image
     fn sample_root_background(&self, x: i16, y: i16, width: u16, height: u16) -> Option<Vec<u8>> {
@@ -1409,7 +1261,7 @@ impl Wm {
 
         // Draw tab background with rounded left corners
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
-        self.draw_rounded_left_rect(window, 0, y, width, height, corner_radius)?;
+        tab_bar::draw_rounded_left_rect(&self.conn, self.gc, window, 0, y, width, height, corner_radius)?;
 
         // Draw bevel effect for 3D raised appearance
         let bevel_light = lighten_color(bg_color, 0x20);
@@ -1532,7 +1384,7 @@ impl Wm {
 
         // Draw tab background with rounded top corners
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(bg_color))?;
-        self.draw_rounded_top_rect(window, x, 0, tab_width, height, corner_radius)?;
+        tab_bar::draw_rounded_top_rect(&self.conn, self.gc, window, x, 0, tab_width, height, corner_radius)?;
 
         // Draw bevel effect for 3D raised appearance
         let bevel_light = lighten_color(bg_color, 0x20);
