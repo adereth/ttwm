@@ -14,6 +14,7 @@ mod startup;
 mod state;
 mod tracing;
 mod types;
+mod window_query;
 mod workspaces;
 
 use std::collections::HashMap;
@@ -1109,7 +1110,7 @@ impl Wm {
         let mut x_offset: i16 = 0;
 
         for &client_window in &frame.windows {
-            let title = self.get_window_title(client_window);
+            let title = window_query::get_window_title(&self.conn, &self.atoms, client_window);
             let title_width = self.font_renderer.measure_text(&title);
             let tab_width = (title_width + H_PADDING + icon_width).clamp(MIN_TAB_WIDTH + icon_width, MAX_TAB_WIDTH + icon_width);
 
@@ -1606,7 +1607,7 @@ impl Wm {
         }
 
         // Get window title and truncate if needed
-        let title = self.get_window_title(client_window);
+        let title = window_query::get_window_title(&self.conn, &self.atoms, client_window);
         let available_width = (tab_width as i32 - h_padding as i32 * 2 - content_offset as i32).max(0) as u32;
         let display_title = self.font_renderer.truncate_text_to_width(&title, available_width);
 
@@ -1777,48 +1778,6 @@ impl Wm {
         self.conn.copy_area(pixmap, window, self.gc, 0, 0, 0, 0, pix_width, pix_height)?;
 
         Ok(())
-    }
-
-    /// Get window title (WM_NAME or _NET_WM_NAME)
-    fn get_window_title(&self, window: Window) -> String {
-        // Try _NET_WM_NAME first
-        if let Ok(reply) = self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_name,
-            self.atoms.utf8_string,
-            0,
-            1024,
-        ) {
-            if let Ok(reply) = reply.reply() {
-                if !reply.value.is_empty() {
-                    if let Ok(s) = String::from_utf8(reply.value) {
-                        return s;
-                    }
-                }
-            }
-        }
-
-        // Fall back to WM_NAME
-        if let Ok(reply) = self.conn.get_property(
-            false,
-            window,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            0,
-            1024,
-        ) {
-            if let Ok(reply) = reply.reply() {
-                if !reply.value.is_empty() {
-                    if let Ok(s) = String::from_utf8(reply.value) {
-                        return s;
-                    }
-                }
-            }
-        }
-
-        // Default title
-        format!("0x{:x}", window)
     }
 
     /// Get window icon from _NET_WM_ICON property, scaled to 20x20 BGRA.
@@ -2318,194 +2277,9 @@ impl Wm {
         Ok(())
     }
 
-    /// Check if a window should float based on its _NET_WM_WINDOW_TYPE property
-    fn should_float(&self, window: Window) -> bool {
-        // Query the _NET_WM_WINDOW_TYPE property
-        let reply = match self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_window_type,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        ) {
-            Ok(cookie) => match cookie.reply() {
-                Ok(reply) => reply,
-                Err(_) => return false,
-            },
-            Err(_) => return false,
-        };
-
-        // Check if any window type indicates it should float
-        if let Some(types) = reply.value32() {
-            for window_type in types {
-                if window_type == self.atoms.net_wm_window_type_dialog
-                    || window_type == self.atoms.net_wm_window_type_splash
-                    || window_type == self.atoms.net_wm_window_type_toolbar
-                    || window_type == self.atoms.net_wm_window_type_utility
-                    || window_type == self.atoms.net_wm_window_type_menu
-                    || window_type == self.atoms.net_wm_window_type_popup_menu
-                    || window_type == self.atoms.net_wm_window_type_dropdown_menu
-                    || window_type == self.atoms.net_wm_window_type_tooltip
-                    || window_type == self.atoms.net_wm_window_type_notification
-                {
-                    log::info!("Window 0x{:x} should float (window type)", window);
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Check if a window is a dock (status bar like polybar)
-    fn is_dock_window(&self, window: Window) -> bool {
-        let reply = match self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_window_type,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        ) {
-            Ok(cookie) => match cookie.reply() {
-                Ok(reply) => reply,
-                Err(_) => return false,
-            },
-            Err(_) => return false,
-        };
-
-        if let Some(types) = reply.value32() {
-            for window_type in types {
-                if window_type == self.atoms.net_wm_window_type_dock {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Read strut partial from a window (returns Default if none set)
-    fn read_struts(&self, window: Window) -> StrutPartial {
-        // Try _NET_WM_STRUT_PARTIAL first (12 values)
-        if let Ok(cookie) = self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_strut_partial,
-            AtomEnum::CARDINAL,
-            0,
-            12,
-        ) {
-            if let Ok(reply) = cookie.reply() {
-                let values: Vec<u32> = reply.value32().map(|v| v.collect()).unwrap_or_default();
-                if values.len() >= 12 {
-                    return StrutPartial {
-                        left: values[0],
-                        right: values[1],
-                        top: values[2],
-                        bottom: values[3],
-                        left_start_y: values[4],
-                        left_end_y: values[5],
-                        right_start_y: values[6],
-                        right_end_y: values[7],
-                        top_start_x: values[8],
-                        top_end_x: values[9],
-                        bottom_start_x: values[10],
-                        bottom_end_x: values[11],
-                    };
-                }
-            }
-        }
-
-        // Fallback to _NET_WM_STRUT (4 values)
-        if let Ok(cookie) = self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_strut,
-            AtomEnum::CARDINAL,
-            0,
-            4,
-        ) {
-            if let Ok(reply) = cookie.reply() {
-                let values: Vec<u32> = reply.value32().map(|v| v.collect()).unwrap_or_default();
-                if values.len() >= 4 {
-                    return StrutPartial {
-                        left: values[0],
-                        right: values[1],
-                        top: values[2],
-                        bottom: values[3],
-                        ..Default::default()
-                    };
-                }
-            }
-        }
-
-        StrutPartial::default()
-    }
-
     /// Check if a window is currently floating
     fn is_floating(&self, window: Window) -> bool {
         self.workspaces().current().is_floating(window)
-    }
-
-    /// Check if a window has the urgent hint set via _NET_WM_STATE or WM_HINTS
-    fn is_window_urgent(&self, window: Window) -> bool {
-        // Check EWMH _NET_WM_STATE_DEMANDS_ATTENTION
-        let reply = match self.conn.get_property(
-            false,
-            window,
-            self.atoms.net_wm_state,
-            AtomEnum::ATOM,
-            0,
-            1024,
-        ) {
-            Ok(cookie) => match cookie.reply() {
-                Ok(reply) => Some(reply),
-                Err(_) => None,
-            },
-            Err(_) => None,
-        };
-
-        if let Some(reply) = reply {
-            if let Some(states) = reply.value32() {
-                for state in states {
-                    if state == self.atoms.net_wm_state_demands_attention {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        // Check legacy WM_HINTS UrgencyHint flag (bit 8 = 256)
-        const URGENCY_HINT: u32 = 256;
-        let hints_reply = match self.conn.get_property(
-            false,
-            window,
-            AtomEnum::WM_HINTS,
-            AtomEnum::WM_HINTS,
-            0,
-            9, // WM_HINTS has 9 CARD32 values
-        ) {
-            Ok(cookie) => match cookie.reply() {
-                Ok(reply) => Some(reply),
-                Err(_) => None,
-            },
-            Err(_) => None,
-        };
-
-        if let Some(reply) = hints_reply {
-            if let Some(values) = reply.value32() {
-                let values: Vec<u32> = values.collect();
-                if !values.is_empty() {
-                    let flags = values[0];
-                    if flags & URGENCY_HINT != 0 {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
     }
 
     /// Find which workspace contains a window (including floating)
@@ -2641,8 +2415,8 @@ impl Wm {
         self.conn.map_window(window)?;
 
         // Check if window is a dock (status bar like polybar)
-        if self.is_dock_window(window) {
-            let struts = self.read_struts(window);
+        if window_query::is_dock_window(&self.conn, &self.atoms, window) {
+            let struts = window_query::read_struts(&self.conn, &self.atoms, window);
             log::info!(
                 "Managing dock 0x{:x}: top={}, bottom={}, left={}, right={}",
                 window, struts.top, struts.bottom, struts.left, struts.right
@@ -2658,7 +2432,7 @@ impl Wm {
         }
 
         // Check if window should float (based on _NET_WM_WINDOW_TYPE)
-        if self.should_float(window) {
+        if window_query::should_float(&self.conn, &self.atoms, window) {
             // Get window geometry for floating placement
             let geom = self.conn.get_geometry(window)?.reply()?;
             let screen = &self.conn.setup().roots[self.screen_num];
@@ -3285,55 +3059,14 @@ impl Wm {
         Ok(())
     }
 
-    /// Check if a window supports the WM_DELETE_WINDOW protocol
-    fn supports_delete_protocol(&self, window: Window) -> bool {
-        // Get WM_PROTOCOLS property
-        if let Ok(cookie) = self.conn.get_property(
-            false,
-            window,
-            self.atoms.wm_protocols,
-            AtomEnum::ATOM,
-            0,
-            32,
-        ) {
-            if let Ok(reply) = cookie.reply() {
-                if let Some(atoms) = reply.value32() {
-                    return atoms.into_iter().any(|a| a == self.atoms.wm_delete_window);
-                }
-            }
-        }
-        false
-    }
-
-    /// Send WM_DELETE_WINDOW client message to request graceful close
-    fn send_delete_window(&self, window: Window) -> Result<()> {
-        let data = ClientMessageData::from([self.atoms.wm_delete_window, 0u32, 0u32, 0u32, 0u32]);
-        let event = ClientMessageEvent {
-            response_type: CLIENT_MESSAGE_EVENT,
-            format: 32,
-            sequence: 0,
-            window,
-            type_: self.atoms.wm_protocols,
-            data,
-        };
-        self.conn.send_event(
-            false,
-            window,
-            EventMask::NO_EVENT,
-            event,
-        )?;
-        self.conn.flush()?;
-        Ok(())
-    }
-
     /// Close the focused window gracefully
     fn close_focused_window(&self) -> Result<()> {
         if let Some(window) = self.focused_window {
             log::info!("Closing window 0x{:x}", window);
 
-            if self.supports_delete_protocol(window) {
+            if window_query::supports_delete_protocol(&self.conn, &self.atoms, window) {
                 log::debug!("Using WM_DELETE_WINDOW protocol");
-                self.send_delete_window(window)?;
+                window_query::send_delete_window(&self.conn, &self.atoms, window)?;
             } else {
                 log::debug!("Window doesn't support WM_DELETE_WINDOW, killing client");
                 self.conn.kill_client(window)?;
@@ -3376,8 +3109,8 @@ impl Wm {
             let window = event.window;
             log::info!("ClientMessage: _NET_CLOSE_WINDOW for 0x{:x}", window);
 
-            if self.supports_delete_protocol(window) {
-                self.send_delete_window(window)?;
+            if window_query::supports_delete_protocol(&self.conn, &self.atoms, window) {
+                window_query::send_delete_window(&self.conn, &self.atoms, window)?;
             } else {
                 self.conn.kill_client(window)?;
                 self.conn.flush()?;
@@ -3583,7 +3316,7 @@ impl Wm {
                 // Handle urgent state changes (EWMH _NET_WM_STATE or legacy WM_HINTS)
                 if e.atom == self.atoms.net_wm_state || e.atom == u32::from(AtomEnum::WM_HINTS) {
                     let was_urgent = self.urgent_windows.contains(&e.window);
-                    let is_urgent = self.is_window_urgent(e.window);
+                    let is_urgent = window_query::is_window_urgent(&self.conn, &self.atoms, e.window);
                     if is_urgent && !was_urgent {
                         self.urgent_windows.push(e.window); // Add to end (newest)
                         log::info!("Window 0x{:x} is now urgent", e.window);
@@ -3599,7 +3332,7 @@ impl Wm {
                 // Handle strut changes for dock windows
                 if e.atom == self.atoms.net_wm_strut || e.atom == self.atoms.net_wm_strut_partial {
                     if self.dock_windows.contains_key(&e.window) {
-                        let new_struts = self.read_struts(e.window);
+                        let new_struts = window_query::read_struts(&self.conn, &self.atoms, e.window);
                         log::info!(
                             "Dock 0x{:x} struts changed: top={}, bottom={}, left={}, right={}",
                             e.window, new_struts.top, new_struts.bottom, new_struts.left, new_struts.right
@@ -4902,7 +4635,7 @@ impl Wm {
                     let is_focused_tab = tab_index == frame.focused;
                     windows.push(WindowInfo {
                         id: window,
-                        title: self.get_window_title(window),
+                        title: window_query::get_window_title(&self.conn, &self.atoms, window),
                         frame: format!("{:?}", frame_id),
                         tab_index,
                         is_focused: is_focused_frame && is_focused_tab && self.focused_window == Some(window),
@@ -4919,7 +4652,7 @@ impl Wm {
         for fw in &self.workspaces().current().floating_windows {
             windows.push(WindowInfo {
                 id: fw.window,
-                title: self.get_window_title(fw.window),
+                title: window_query::get_window_title(&self.conn, &self.atoms, fw.window),
                 frame: "floating".to_string(),
                 tab_index: 0,
                 is_focused: self.focused_window == Some(fw.window),
