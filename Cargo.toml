@@ -47,6 +47,10 @@ shellexpand = "3"
 # POSIX system calls (for process detachment)
 libc = "0.2"
 
+[dev-dependencies]
+# Image comparison for screenshot regression tests
+image = { version = "0.24", default-features = false, features = ["png"] }
+
 [[bin]]
 name = "ttwm"
 path = "src/main.rs"
